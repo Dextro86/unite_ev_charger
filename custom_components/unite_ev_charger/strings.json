@@ -1,0 +1,255 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to your Unite charger",
+        "description": "Enter the charger's IP address. Modbus TCP must be enabled on the charger.",
+        "data": {
+          "name": "Name",
+          "host": "IP address",
+          "port": "Port",
+          "unit_id": "Modbus unit ID"
+        }
+      },
+      "reconfigure": {
+        "title": "Change connection",
+        "description": "Update the charger's IP address, port or Modbus unit ID.",
+        "data": {
+          "host": "IP address",
+          "port": "Port",
+          "unit_id": "Modbus unit ID"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the charger. Check the IP address, port and that Modbus TCP is enabled.",
+      "unknown": "Unexpected error while connecting."
+    },
+    "abort": {
+      "already_configured": "This charger is already configured."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "charge_point_state": {
+        "name": "Status",
+        "state": {
+          "available": "Available",
+          "preparing": "Preparing",
+          "charging": "Charging",
+          "suspended_evse": "Suspended (charger)",
+          "suspended_ev": "Suspended (vehicle)",
+          "finishing": "Finishing",
+          "reserved": "Reserved",
+          "unavailable": "Unavailable",
+          "faulted": "Faulted"
+        }
+      },
+      "active_power": { "name": "Power" },
+      "current_l1": { "name": "Current L1" },
+      "current_l2": { "name": "Current L2" },
+      "current_l3": { "name": "Current L3" },
+      "voltage_l1": { "name": "Voltage L1" },
+      "voltage_l2": { "name": "Voltage L2" },
+      "voltage_l3": { "name": "Voltage L3" },
+      "session_energy": { "name": "Session energy" },
+      "session_duration": { "name": "Session duration" },
+      "meter_energy": { "name": "Total energy" },
+      "set_current": { "name": "Hardware current limit" },
+      "available_surplus": { "name": "Available solar surplus" },
+      "control_setpoint": { "name": "Control target current" },
+      "phases_in_use": { "name": "Phases in use" },
+      "evcc_status": { "name": "evcc status" },
+      "charger_state": {
+        "name": "Charger state",
+        "state": {
+          "idle": "No vehicle",
+          "connected": "Connected",
+          "charging": "Charging",
+          "phase_mismatch": "Phase mismatch",
+          "recovery": "Phase recovery",
+          "restarting": "Restarting",
+          "disconnected": "Disconnected",
+          "fault": "Fault"
+        }
+      },
+      "last_recovery": { "name": "Last phase recovery" },
+      "last_restart": { "name": "Last restart" },
+      "register_404": { "name": "Register 404" },
+      "register_405": { "name": "Register 405" },
+      "recovery_status": { "name": "Phase recovery status" },
+      "recovery_remaining": { "name": "Phase recovery remaining" }
+    },
+    "binary_sensor": {
+      "vehicle_connected": { "name": "Vehicle connected" },
+      "charging": { "name": "Charging" },
+      "fault": { "name": "Fault" },
+      "phase_mismatch": { "name": "Phase mismatch" },
+      "connection": { "name": "Connection" }
+    },
+    "switch": {
+      "charging": { "name": "Charging" }
+    },
+    "select": {
+      "mode": {
+        "name": "Mode",
+        "state": {
+          "fast": "Fast",
+          "manual": "Manual",
+          "solar": "Solar",
+          "min_solar": "Minimum plus Solar"
+        }
+      },
+      "phase_select": { "name": "Phase" },
+      "phase_preference": {
+        "name": "Phases",
+        "state": {
+          "auto": "Auto",
+          "1": "1 phase",
+          "3": "3 phases"
+        }
+      }
+    },
+    "number": {
+      "charge_current": { "name": "Charge current" }
+    },
+    "button": {
+      "restart": { "name": "Restart" }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Settings",
+        "menu_options": {
+          "connection": "Connection",
+          "charge": "Charging",
+          "meter": "Power meter",
+          "dlb": "Dynamic Load Balancing (DLB)",
+          "solar": "Solar",
+          "advanced": "Advanced",
+          "reboot": "Restart (web UI)",
+          "save": "Save & close"
+        }
+      },
+      "connection": {
+        "title": "Connection",
+        "data": {
+          "host": "IP address",
+          "port": "Port",
+          "unit_id": "Modbus unit ID"
+        }
+      },
+      "charge": {
+        "title": "Charging",
+        "data": {
+          "control_mode": "Charging control",
+          "default_mode": "Default mode",
+          "min_current": "Minimum charge current (A)",
+          "max_current": "Maximum charge current (A)",
+          "phase_switching": "Enable phase switching (1<->3)",
+          "phase_recovery_enabled": "Enable 1→3 phase recovery",
+          "phase_recovery_observe": "1→3 observation time (s)",
+          "phase_recovery_dwell": "1→3 recovery time (s)"
+        }
+      },
+      "meter": {
+        "title": "Power meter",
+        "description": "Choose how you measure grid/solar power. Shared by Solar and DLB.",
+        "data": { "meter_model": "Meter type" }
+      },
+      "meter_signed": {
+        "title": "Signed grid power sensor",
+        "data": {
+          "grid_power_sensor": "Grid power sensor",
+          "grid_export_negative": "Export is negative",
+          "nominal_voltage": "Nominal voltage (V)"
+        }
+      },
+      "meter_dsmr": {
+        "title": "Import + export sensors",
+        "data": {
+          "import_power_sensor": "Import power sensor",
+          "export_power_sensor": "Export power sensor",
+          "nominal_voltage": "Nominal voltage (V)"
+        }
+      },
+      "meter_surplus": {
+        "title": "Surplus sensor",
+        "data": {
+          "surplus_power_sensor": "Surplus power sensor",
+          "nominal_voltage": "Nominal voltage (V)"
+        }
+      },
+      "dlb": {
+        "title": "Dynamic Load Balancing (DLB)",
+        "description": "Caps charging so each phase stays under the main fuse. Provide L1 (and L2/L3 for a 3-phase connection).",
+        "data": {
+          "dlb_enabled": "Limit total load",
+          "main_fuse_a": "Main fuse (A)",
+          "dlb_margin_a": "Safety margin (A)",
+          "dlb_current_l1": "Grid current L1",
+          "dlb_current_l2": "Grid current L2",
+          "dlb_current_l3": "Grid current L3"
+        }
+      },
+      "solar": {
+        "title": "Solar",
+        "data": {
+          "solar_min_current": "Minimum solar current (A)",
+          "phase_switch_dwell": "Phase-switch dwell (s)"
+        }
+      },
+      "advanced": {
+        "title": "Advanced",
+        "data": {
+          "poll_interval": "Polling interval (s)",
+          "failsafe_current": "Failsafe current (A)",
+          "failsafe_timeout": "Failsafe timeout (s)"
+        }
+      },
+      "reboot": {
+        "title": "Restart (web UI)",
+        "description": "Enable the charger's web UI login to add a Restart button. This uses HTTPS (Modbus has no reboot), separate from charging control.",
+        "data": {
+          "rest_enabled": "Enable web UI restart",
+          "rest_username": "Web UI username",
+          "rest_password": "Web UI password"
+        }
+      }
+    },
+    "error": {
+      "min_above_max": "Minimum current cannot be higher than the maximum.",
+      "not_power": "That looks like an energy sensor (kWh). Please pick a power sensor (W/kW).",
+      "dlb_needs_l1": "Enabling DLB requires at least the L1 grid current sensor.",
+      "cannot_connect": "Cannot connect to the charger. Check the IP address, port and that Modbus TCP is enabled.",
+      "unknown": "Unexpected error while connecting.",
+      "invalid_auth": "Invalid web UI username or password.",
+      "rest_cannot_connect": "Cannot reach the charger's web UI. Check that it is on and reachable."
+    }
+  },
+  "selector": {
+    "control_mode": {
+      "options": {
+        "internal": "Built-in (solar / load balancing / manual)",
+        "external": "External controller (e.g. evcc)"
+      }
+    },
+    "charge_mode": {
+      "options": {
+        "fast": "Fast",
+        "manual": "Manual",
+        "solar": "Solar",
+        "min_solar": "Minimum plus Solar"
+      }
+    },
+    "meter_model": {
+      "options": {
+        "none": "None",
+        "signed_grid": "HomeWizard P1 / signed grid power",
+        "dsmr": "DSMR (import + export)",
+        "surplus": "Surplus sensor"
+      }
+    }
+  }
+}

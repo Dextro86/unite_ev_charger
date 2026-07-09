@@ -1,0 +1,13 @@
+{
+  "domain": "unite_ev_charger",
+  "name": "Unite EV Charger",
+  "codeowners": ["@Dextro86"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/Dextro86/unite_ev_charger",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Dextro86/unite_ev_charger/issues",
+  "requirements": ["pymodbus>=3.8,<4"],
+  "version": "0.1.0"
+}
