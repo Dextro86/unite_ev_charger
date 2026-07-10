@@ -179,13 +179,28 @@ and the web UI in ~5 min, so repeat presses are ignored for a short cooldown.
 
 Set *Charging control* to **External** and the built-in loop goes passive; the
 entities become a faithful passthrough for evcc's
-[Home Assistant charger](https://docs.evcc.io/en/docs/devices/chargers#home-assistant):
+[Home Assistant charger](https://docs.evcc.io/en/docs/devices/chargers#home-assistant).
+Copy this into your `evcc.yaml` and replace the entity IDs with your own (see the
+note below on how to find them):
+
+```yaml
+chargers:
+  - name: unite
+    type: template
+    template: homeassistant
+    baseurl: http://homeassistant.local:8123   # or http://<HA-IP>:8123
+    token: <long-lived-access-token>            # HA -> profile -> Long-lived access tokens
+    status:     sensor.<device>_evcc_status
+    enabled:    switch.<device>_charging
+    enable:     switch.<device>_charging
+    maxcurrent: number.<device>_charge_current
+    phases1p3p: select.<device>_phase           # optional
+```
 
 | evcc charger field | Entity (by name) |
 |---|---|
 | `status` (A/B/C) | `sensor` **evcc status** |
-| `enabled` | `switch` **Charging** |
-| `enable` | `switch` **Charging** |
+| `enabled` / `enable` | `switch` **Charging** |
 | `maxcurrent` | `number` **Charge current** |
 | `phases1p3p` (1↔3) | `select` **Phase** |
 
