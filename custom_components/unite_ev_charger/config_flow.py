@@ -168,7 +168,8 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
                 await client.async_close()
 
             if not errors:
-                unique = str(serial) or f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}"
+                serial_str = str(serial).strip() if serial else ""
+                unique = serial_str or f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}"
                 await self.async_set_unique_id(unique)
                 self._abort_if_unique_id_configured()
                 title = user_input.get(CONF_NAME) or "Unite EV Charger"

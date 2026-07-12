@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-local%20polling-blue.svg)](https://www.home-assistant.io/)
 
-A Home Assistant integration to monitor and control the **Webasto / Ampure Unite**
+A Home Assistant integration to monitor and control the **Webasto Unite**
 (a rebadged Vestel EVC04) over local **Modbus TCP** — with solar-surplus charging,
 dynamic load balancing, evcc support and an optional web-UI restart button.
 
@@ -15,7 +15,7 @@ dynamic load balancing, evcc support and an optional web-UI restart button.
 **What it does:** local monitoring + charge control, solar/DLB, phase control, evcc
 passthrough, and a web-UI reboot.
 **What it does not do:** no cloud, no OCPP; it talks only to the charger on your LAN,
-and targets the Vestel EVC04 family (Webasto/Ampure Unite).
+and targets the Vestel EVC04 family (Webasto Unite).
 
 Available in **English and Dutch** — Home Assistant picks the user's language.
 
@@ -45,15 +45,15 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
   so the car re-negotiates, then resumes. See [Phase switching](#phase-switching).
 - **External control (evcc)** — a faithful passthrough that exposes exactly the
   entities evcc's Home Assistant charger expects. See [evcc](#evcc-support).
-- **Restart button (web UI)** *(opt-in)* — reboot the wallbox from HA over HTTPS,
-  since Modbus has no reboot register. See [Restart](#restart-button-web-ui).
+- **Restart button (web UI)** *(opt-in)* — reboot the wallbox from HA over its
+  local web UI, since Modbus has no reboot register. See [Restart](#restart-button-web-ui).
 - **Safety & resilience** — failsafe current/timeout, an alive heartbeat, and a
   full ownership handshake re-asserted on every reconnect. See
   [Modbus ownership](#modbus-ownership-failsafe--reconnect).
 
 ## Requirements
 
-- A Webasto/Ampure Unite with **Modbus TCP enabled** (in the charger's web UI).
+- A Webasto Unite with **Modbus TCP enabled** (in the charger's web UI).
 - The charger's IP address. Default port `502`, Modbus unit id `255`.
 - Only **one** Modbus master may talk to the charger at a time — do not run this
   integration and evcc's Modbus charger against the same wallbox simultaneously.
@@ -175,13 +175,13 @@ is unaffected. After a reboot the wallbox drops Modbus and the reconnect handsha
 re-claims it automatically. Measured on real hardware: Modbus returns in ~4–5 min
 and the web UI in ~5 min, so repeat presses are ignored for a short cooldown.
 
-## evcc support
+## Use in evcc
 
 Set *Charging control* to **External** and the built-in loop goes passive; the
 entities become a faithful passthrough for evcc's
 [Home Assistant charger](https://docs.evcc.io/en/docs/devices/chargers#home-assistant).
-Copy this into your `evcc.yaml` and replace the entity IDs with your own (see the
-note below on how to find them):
+The entity IDs are **fixed and language-independent** (they don't change with your
+Home Assistant language), so you can copy this straight into your `evcc.yaml`:
 
 ```yaml
 chargers:
@@ -190,52 +190,20 @@ chargers:
     template: homeassistant
     baseurl: http://homeassistant.local:8123   # or http://<HA-IP>:8123
     token: <long-lived-access-token>            # HA -> profile -> Long-lived access tokens
-    status:     sensor.<device>_evcc_status
-    enabled:    switch.<device>_charging
-    enable:     switch.<device>_charging
-    maxcurrent: number.<device>_charge_current
-    phases1p3p: select.<device>_phase           # optional
+    status:     sensor.unite_ev_charger_evcc_status
+    enabled:    switch.unite_ev_charger_charging_enabled
+    enable:     switch.unite_ev_charger_charging_enabled
+    maxcurrent: number.unite_ev_charger_charge_current
+    # optional telemetry:
+    power:      sensor.unite_ev_charger_active_power
+    energy:     sensor.unite_ev_charger_meter_energy
+    # optional 1p/3p phase switching:
+    phases1p3p: select.unite_ev_charger_phase_select
 ```
 
-| evcc charger field | Entity (by name) |
-|---|---|
-| `status` (A/B/C) | `sensor` **evcc status** |
-| `enabled` / `enable` | `switch` **Charging** |
-| `maxcurrent` | `number` **Charge current** |
-| `phases1p3p` (1↔3) | `select` **Phase** |
-
-> **Finding the exact `entity_id`:** evcc needs entity IDs, and Home Assistant
-> generates those from the entity's display name **in your HA language** — so on a
-> Dutch install the `status` entity is `sensor.<device>_evcc_status`, `Charging`
-> becomes `switch.<device>_laden`, etc. Look up the real IDs under
-> *Developer Tools → States* (filter on your device name) and paste those into evcc.
+The IDs above are what a single charger gets. If you added a **second** charger,
+Home Assistant appends a suffix (`..._2`) — check yours under
+*Developer Tools → States* (filter `unite_ev_charger`).
 
 The heartbeat keeps running so the wallbox never drops to failsafe; evcc owns all
 charging decisions. Mode/Solar/DLB entities are unavailable in this mode.
-
-## Register map
-
-Verified against two independent, working implementations and the official spec.
-
-| Register | Meaning | Access |
-|---|---|---|
-| 404 | Phase capability (0 = 1-phase, 1 = 3-phase) | R |
-| 405 | Phase switch (0 = 1-phase, 1 = 3-phase) | R/W |
-| 1000 | Charge point state (A/B/C/…) | R |
-| 1004 | Cable state | R |
-| 1008 / 1010 / 1012 | Current L1 / L2 / L3 | R |
-| 1014 / 1016 / 1018 | Voltage L1 / L2 / L3 | R |
-| 1020 | Active power | R |
-| 1502 | Session energy | R |
-| 1508 | Session duration | R |
-| 2000 | Failsafe current | R/W |
-| 2002 | Failsafe timeout | R/W |
-| 5004 | Charging current setpoint | R/W |
-| 6000 | Alive (heartbeat) | R/W |
-
-## Disclaimer
-
-Controlling charging current and phase switching interacts with your home's
-electrical installation. Configure the main fuse and load-balancing sensors
-correctly. Correct wiring of the charger is the installer's responsibility. Use at
-your own risk.

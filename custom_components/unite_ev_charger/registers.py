@@ -1,4 +1,4 @@
-"""Verified Modbus register map for the Webasto/Ampure Unite (Vestel EVC04).
+"""Verified Modbus register map for the Webasto Unite (Vestel EVC04).
 
 Telemetry lives on INPUT registers; control lives on HOLDING registers.
 Registers that appeared in earlier home-grown maps but could not be

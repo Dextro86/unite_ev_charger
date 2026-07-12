@@ -2,7 +2,7 @@
 """Behavioral Webasto Unite simulator.
 
 A tiny self-contained Modbus TCP server + web control panel that mimics a
-Webasto/Ampure Unite, so the Unite EV Charger integration can be tested in Home
+Webasto Unite, so the Unite EV Charger integration can be tested in Home
 Assistant (or in automated tests) without the real wallbox.
 
 Dev tool only - pure asyncio + stdlib, no pymodbus dependency, so it cannot

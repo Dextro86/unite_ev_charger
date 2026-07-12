@@ -135,7 +135,19 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             await write_heartbeat(self.client)
 
             if self.controller is not None:
-                await self.controller.async_apply(data)
+                try:
+                    await self.controller.async_apply(data)
+                except WebastoModbusError:
+                    # A genuine Modbus failure: let it reach the outer handler so
+                    # the connection is dropped and reclaimed next cycle.
+                    raise
+                except Exception:  # noqa: BLE001
+                    # A control-logic hiccup (e.g. a stale/malformed meter sensor)
+                    # must never blank out monitoring. Log it and keep serving the
+                    # telemetry we already read; control retries next cycle.
+                    _LOGGER.exception(
+                        "Charge control step failed; keeping monitoring alive"
+                    )
 
             return data
         except WebastoModbusError as err:
@@ -165,4 +177,10 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
 
     @property
     def device_unique_id(self) -> str:
-        return self.device.serial_number or self.entry.entry_id
+        # Must be STABLE for the life of the config entry: HA keys the device
+        # and every entity on this value. `entry.unique_id` is captured once at
+        # config time (serial, or host:port) and never changes. Deriving it from
+        # the runtime `device.serial_number` instead caused a duplicate device on
+        # restart whenever that read transiently returned nothing (charger still
+        # booting / Modbus busy) and it fell back to entry_id.
+        return self.entry.unique_id or self.entry.entry_id
