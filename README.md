@@ -205,5 +205,18 @@ The IDs above are what a single charger gets. If you added a **second** charger,
 Home Assistant appends a suffix (`..._2`) — check yours under
 *Developer Tools → States* (filter `unite_ev_charger`).
 
+Full entity reference:
+
+| evcc field | Entity ID |
+|---|---|
+| status | `sensor.unite_ev_charger_evcc_status` |
+| enabled / enable | `switch.unite_ev_charger_charging_enabled` |
+| maxcurrent | `number.unite_ev_charger_charge_current` |
+| power | `sensor.unite_ev_charger_active_power` |
+| energy | `sensor.unite_ev_charger_meter_energy` |
+| currentL1 / L2 / L3 | `sensor.unite_ev_charger_current_l1` / `_l2` / `_l3` |
+| voltageL1 / L2 / L3 | `sensor.unite_ev_charger_voltage_l1` / `_l2` / `_l3` |
+| phases1p3p | `select.unite_ev_charger_phase_select` |
+
 The heartbeat keeps running so the wallbox never drops to failsafe; evcc owns all
 charging decisions. Mode/Solar/DLB entities are unavailable in this mode.
