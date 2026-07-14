@@ -29,9 +29,14 @@ from .const import (
     CONF_DLB_CURRENT_L3,
     CONF_DLB_ENABLED,
     CONF_DLB_MARGIN_A,
+    CONF_DLB_PHASES,
+    CONF_DLB_SENSOR_MAX_AGE,
     CONF_EXPORT_SENSOR,
     CONF_GRID_EXPORT_NEGATIVE,
     CONF_GRID_POWER_SENSOR,
+    CONF_FAILSAFE_CURRENT,
+    CONF_INCREASE_DELAY,
+    CONF_INCREASE_STEP,
     CONF_IMPORT_SENSOR,
     CONF_MAIN_FUSE_A,
     CONF_MAX_CURRENT,
@@ -49,6 +54,11 @@ from .const import (
     CONTROL_EXTERNAL,
     DEFAULT_CONTROL_MODE,
     DEFAULT_DLB_MARGIN_A,
+    DEFAULT_DLB_PHASES,
+    DEFAULT_DLB_SENSOR_MAX_AGE_S,
+    DEFAULT_FAILSAFE_CURRENT_A,
+    DEFAULT_INCREASE_DELAY_S,
+    DEFAULT_INCREASE_STEP_A,
     DEFAULT_MAIN_FUSE_A,
     DEFAULT_MAX_CURRENT_A,
     DEFAULT_MIN_CURRENT_A,
@@ -59,6 +69,7 @@ from .const import (
     DEFAULT_PHASE_SWITCH_DWELL_S,
     DEFAULT_PHASE_PREFERENCE,
     DEFAULT_PHASE_SWITCHING,
+    DLB_CURRENT_PLAUSIBLE_FLOOR_A,
     METER_DSMR,
     METER_NONE,
     METER_SIGNED_GRID,
@@ -107,6 +118,8 @@ class ControlConfig:
     dlb_enabled: bool
     main_fuse_a: int
     dlb_margin_a: int
+    dlb_phases: int
+    dlb_sensor_max_age: int
     dlb_l1: str | None
     dlb_l2: str | None
     dlb_l3: str | None
@@ -115,6 +128,9 @@ class ControlConfig:
     phase_recovery_enabled: bool
     phase_recovery_observe: int
     phase_recovery_dwell: int
+    failsafe_current: int
+    increase_delay: int
+    increase_step: int
 
     @classmethod
     def from_entry(cls, entry: ConfigEntry) -> "ControlConfig":
@@ -136,6 +152,10 @@ class ControlConfig:
             dlb_enabled=bool(o.get(CONF_DLB_ENABLED, False)),
             main_fuse_a=int(o.get(CONF_MAIN_FUSE_A, DEFAULT_MAIN_FUSE_A)),
             dlb_margin_a=int(o.get(CONF_DLB_MARGIN_A, DEFAULT_DLB_MARGIN_A)),
+            dlb_phases=int(o.get(CONF_DLB_PHASES, DEFAULT_DLB_PHASES)),
+            dlb_sensor_max_age=int(
+                o.get(CONF_DLB_SENSOR_MAX_AGE, DEFAULT_DLB_SENSOR_MAX_AGE_S)
+            ),
             dlb_l1=o.get(CONF_DLB_CURRENT_L1),
             dlb_l2=o.get(CONF_DLB_CURRENT_L2),
             dlb_l3=o.get(CONF_DLB_CURRENT_L3),
@@ -150,6 +170,11 @@ class ControlConfig:
             phase_recovery_dwell=int(
                 o.get(CONF_PHASE_RECOVERY_DWELL, DEFAULT_PHASE_RECOVERY_DWELL_S)
             ),
+            failsafe_current=ctrl.normalize_failsafe_current(
+                int(o.get(CONF_FAILSAFE_CURRENT, DEFAULT_FAILSAFE_CURRENT_A))
+            ),
+            increase_delay=int(o.get(CONF_INCREASE_DELAY, DEFAULT_INCREASE_DELAY_S)),
+            increase_step=int(o.get(CONF_INCREASE_STEP, DEFAULT_INCREASE_STEP_A)),
         )
 
 
@@ -170,10 +195,15 @@ class ChargeControl:
         # Exposed for sensors/diagnostics.
         self.computed_setpoint: int | None = None
         self.available_surplus_w: float | None = None
+        self.dlb_healthy: bool | None = None
+        self.dlb_failure_reason: str | None = None
 
         # Internal state.
         self._surplus_window: deque[tuple[float, float]] = deque()
         self._last_setpoint: int | None = None
+        self._started_at = datetime.now(timezone.utc)
+        self._increase_since: float | None = None
+        self._heartbeat_allowed = not self.cfg.dlb_enabled
         self._was_connected: bool = False
         self._charge_started: float | None = None
         # Phase-switch timers.
@@ -204,6 +234,11 @@ class ChargeControl:
     @property
     def recovery_active(self) -> bool:
         return self._recovery_task is not None and not self._recovery_task.done()
+
+    @property
+    def heartbeat_allowed(self) -> bool:
+        """Whether current control has a trustworthy input snapshot."""
+        return self._heartbeat_allowed
 
     @property
     def recovery_status(self) -> str:
@@ -481,6 +516,9 @@ class ChargeControl:
 
     # -- the per-cycle entry point ------------------------------------------
     async def async_apply(self, data: WallboxData) -> None:
+        # Fail closed until this cycle proves every required DLB input healthy.
+        # External control does not use this integration's DLB loop.
+        self._heartbeat_allowed = not self.cfg.dlb_enabled or self.is_external
         connected = data.vehicle_connected
         just_disconnected = self._was_connected and not connected
         self._was_connected = connected
@@ -494,6 +532,7 @@ class ChargeControl:
             return
         # A recovery owns the charger while it runs; keep the control loop out.
         if self.recovery_active:
+            self._heartbeat_allowed = self.dlb_healthy is True
             return
 
         # Reset-on-disconnect: revert to the default mode when the car is
@@ -523,19 +562,37 @@ class ChargeControl:
             voltage=voltage,
             limits=limits,
         )
-        dlb_cap = self._dlb_cap(data)
-        setpoint = ctrl.finalize_a(
+        dlb_cap, dlb_error = self._dlb_cap(data)
+        if dlb_error is not None:
+            await self._apply_dlb_failsafe(data, dlb_error)
+            return
+
+        self._set_dlb_health(True if self.cfg.dlb_enabled else None, None)
+        self._heartbeat_allowed = True
+
+        # Solar anti-short-cycle may hold its minimum through a cloud transient,
+        # but it must run before DLB so grid protection always wins last.
+        mode_setpoint = ctrl.finalize_a(
             target,
-            dlb_cap=dlb_cap,
+            dlb_cap=None,
             limits=limits,
             charging_enabled=self.charging_enabled,
             vehicle_connected=connected,
         )
         if self.mode in SOLAR_MODES:
-            setpoint = self._anti_short_cycle(setpoint, limits)
+            mode_setpoint = self._anti_short_cycle(mode_setpoint, limits)
+
+        safe_target = ctrl.finalize_a(
+            mode_setpoint,
+            dlb_cap=dlb_cap,
+            limits=limits,
+            charging_enabled=self.charging_enabled,
+            vehicle_connected=connected,
+        )
+        setpoint = self._limit_increase(safe_target, data.set_current_a, limits)
 
         self.computed_setpoint = setpoint
-        await self._write_setpoint(setpoint)
+        await self._write_setpoint(setpoint, current_limit=data.set_current_a)
 
     # -- internals -----------------------------------------------------------
     def _active_phases(self, data: WallboxData) -> int:
@@ -677,28 +734,75 @@ class ChargeControl:
             return ctrl.available_surplus_w(export, data.active_power_w), True
         return 0.0, False
 
-    def _dlb_cap(self, data: WallboxData) -> float | None:
+    def _dlb_cap(self, data: WallboxData) -> tuple[float | None, str | None]:
         if not self.cfg.dlb_enabled:
-            return None
+            return None, None
         pairs = (
             (self.cfg.dlb_l1, data.current_l1_a),
             (self.cfg.dlb_l2, data.current_l2_a),
             (self.cfg.dlb_l3, data.current_l3_a),
         )
+        required = pairs[:1] if self.cfg.dlb_phases == 1 else pairs
         grid_a: list[float] = []
         charger_a: list[float] = []
-        for sensor_id, charger_current in pairs:
+        plausible_max = max(
+            DLB_CURRENT_PLAUSIBLE_FLOOR_A,
+            self.cfg.main_fuse_a * 2.0,
+        )
+        for phase, (sensor_id, charger_current) in enumerate(required, start=1):
             if not sensor_id:
-                continue
-            amps = read_current_a(self.hass, sensor_id)
+                return None, f"L{phase} grid-current sensor is not configured"
+            amps = read_current_a(
+                self.hass,
+                sensor_id,
+                max_age_s=self.cfg.dlb_sensor_max_age,
+                not_before=self._started_at,
+            )
             if amps is None:
-                continue
+                return None, f"L{phase} grid-current sensor is unavailable or stale"
+            if not ctrl.plausible_current(amps, plausible_max):
+                _LOGGER.debug("DLB L%s grid current is implausible: %r A", phase, amps)
+                return None, f"L{phase} grid current is implausible"
+            if not ctrl.plausible_current(charger_current, ABS_MAX_CURRENT_A * 2.0):
+                _LOGGER.debug(
+                    "DLB L%s charger current is implausible: %r A",
+                    phase,
+                    charger_current,
+                )
+                return None, f"L{phase} charger current is implausible"
             grid_a.append(amps)
             charger_a.append(charger_current)
-        if not grid_a:
-            _LOGGER.debug("DLB enabled but no usable grid current sensor; not capping")
-            return None
-        return ctrl.dlb_cap_a(self.cfg.main_fuse_a, self.cfg.dlb_margin_a, grid_a, charger_a)
+        return (
+            ctrl.dlb_cap_a(
+                self.cfg.main_fuse_a,
+                self.cfg.dlb_margin_a,
+                grid_a,
+                charger_a,
+            ),
+            None,
+        )
+
+    def _set_dlb_health(self, healthy: bool | None, reason: str | None) -> None:
+        previous = self.dlb_healthy
+        previous_reason = self.dlb_failure_reason
+        self.dlb_healthy = healthy
+        self.dlb_failure_reason = reason
+        if healthy is False and (previous is not False or previous_reason != reason):
+            _LOGGER.warning("DLB paused: %s; applying failsafe current", reason)
+        elif healthy is True and previous is False:
+            _LOGGER.info("DLB input recovered; normal control resumed")
+
+    async def _apply_dlb_failsafe(self, data: WallboxData, reason: str) -> None:
+        self._set_dlb_health(False, reason)
+        self._heartbeat_allowed = False
+        self._increase_since = None
+        setpoint = max(0, min(ABS_MAX_CURRENT_A, self.cfg.failsafe_current))
+        self.computed_setpoint = setpoint
+        await self._write_setpoint(
+            setpoint,
+            current_limit=data.set_current_a,
+            bypass_quiet=True,
+        )
 
     def _smooth(self, surplus_w: float) -> float:
         now = monotonic()
@@ -727,18 +831,61 @@ class ChargeControl:
         self._charge_started = None
         return 0
 
-    async def _write_setpoint(self, setpoint: int) -> None:
+    def _limit_increase(
+        self,
+        target: int,
+        current_limit: int | None,
+        limits: ctrl.Limits,
+    ) -> int:
+        """Apply immediate reductions and delayed, stepped increases."""
+        current = current_limit
+        if current is None:
+            current = self._last_setpoint
+        if current is None:
+            current = max(0, min(ABS_MAX_CURRENT_A, self.cfg.failsafe_current))
+
+        if target <= current:
+            self._increase_since = None
+            return target
+
+        now = monotonic()
+        if self._increase_since is None:
+            self._increase_since = now
+            if self.cfg.increase_delay > 0:
+                return current
+        if now - self._increase_since < self.cfg.increase_delay:
+            return current
+
+        self._increase_since = now
+        if current < limits.min_current:
+            return min(target, limits.min_current)
+        return min(target, current + self.cfg.increase_step)
+
+    async def _write_setpoint(
+        self,
+        setpoint: int,
+        *,
+        current_limit: int | None = None,
+        bypass_quiet: bool = False,
+    ) -> None:
         # Quiet period right after a phase switch: leave the current setpoint
-        # alone so the wallbox can finish its internal CP interruption. The
-        # heartbeat (written by the coordinator) keeps going regardless.
-        if self._last_switch is not None and monotonic() - self._last_switch < PHASE_SWITCH_QUIET_S:
+        # alone so the wallbox can finish its internal CP interruption. Safety
+        # reductions and failsafe writes always bypass this delay.
+        previous = current_limit if current_limit is not None else self._last_setpoint
+        reducing = previous is not None and setpoint < previous
+        if (
+            not bypass_quiet
+            and not reducing
+            and self._last_switch is not None
+            and monotonic() - self._last_switch < PHASE_SWITCH_QUIET_S
+        ):
             _LOGGER.debug("Holding charge-current write during post-phase-switch quiet period")
             return
-        if setpoint == self._last_setpoint:
-            return
-        try:
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, setpoint)
+        if current_limit is not None and setpoint == current_limit:
             self._last_setpoint = setpoint
-            _LOGGER.debug("Wrote charge current setpoint: %s A", setpoint)
-        except WebastoModbusError as err:
-            _LOGGER.warning("Failed to write charge current setpoint %s A: %s", setpoint, err)
+            return
+        if current_limit is None and setpoint == self._last_setpoint:
+            return
+        await self.coordinator.client.write_register(R.SET_CURRENT_A, setpoint)
+        self._last_setpoint = setpoint
+        _LOGGER.debug("Wrote charge current setpoint: %s A", setpoint)

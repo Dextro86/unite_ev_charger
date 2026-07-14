@@ -33,12 +33,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = WebastoCoordinator(hass, entry, client)
 
     try:
+        await coordinator.async_claim_connection()
         await coordinator.async_read_device_info()
     except WebastoModbusError as err:
         await client.async_close()
         raise ConfigEntryNotReady(f"Could not reach the charger: {err}") from err
 
     coordinator.controller = ChargeControl(hass, entry, coordinator)
+    # Initial claim happens before the controller exists. Re-apply controller
+    # intent now; external mode starts at 0 A until its owner sends a command.
+    await coordinator.controller.async_on_reconnect(None)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator

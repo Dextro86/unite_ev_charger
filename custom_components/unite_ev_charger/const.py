@@ -59,9 +59,19 @@ PLAUSIBLE_VOLTAGE_MAX: Final = 260
 # --- DLB defaults -----------------------------------------------------------
 DEFAULT_DLB_MARGIN_A: Final = 2
 DEFAULT_MAIN_FUSE_A: Final = 25
+DEFAULT_DLB_PHASES: Final = 3
+DEFAULT_DLB_SENSOR_MAX_AGE_S: Final = 30
+
+# A grid-current reading outside this generic envelope is treated as invalid.
+# It permits large motor/startup transients and export while rejecting broken
+# sensors (NaN/inf, unit mistakes, wrapped Modbus values). The effective bound
+# is the larger of this floor and twice the configured main fuse.
+DLB_CURRENT_PLAUSIBLE_FLOOR_A: Final = 64.0
 
 DEFAULT_MIN_CURRENT_A: Final = 6
 DEFAULT_MAX_CURRENT_A: Final = 16
+DEFAULT_INCREASE_DELAY_S: Final = 10
+DEFAULT_INCREASE_STEP_A: Final = 1
 
 # --- Charging control owner -------------------------------------------------
 # internal = our own solar/DLB/manual control loop drives the charger.
@@ -176,6 +186,8 @@ CHARGER_STATES: Final = (
 CONF_DLB_ENABLED: Final = "dlb_enabled"
 CONF_MAIN_FUSE_A: Final = "main_fuse_a"
 CONF_DLB_MARGIN_A: Final = "dlb_margin_a"
+CONF_DLB_PHASES: Final = "dlb_phases"
+CONF_DLB_SENSOR_MAX_AGE: Final = "dlb_sensor_max_age"
 CONF_DLB_CURRENT_L1: Final = "dlb_current_l1"
 CONF_DLB_CURRENT_L2: Final = "dlb_current_l2"
 CONF_DLB_CURRENT_L3: Final = "dlb_current_l3"
@@ -183,6 +195,22 @@ CONF_DLB_CURRENT_L3: Final = "dlb_current_l3"
 # Advanced
 CONF_FAILSAFE_CURRENT: Final = "failsafe_current"
 CONF_FAILSAFE_TIMEOUT: Final = "failsafe_timeout"
+CONF_INCREASE_DELAY: Final = "increase_delay"
+CONF_INCREASE_STEP: Final = "increase_step"
+
+# Some Unite firmware exposes telemetry through input registers (FC4), while
+# other installations respond through holding registers (FC3). Auto preserves
+# compatibility without hard-coding either firmware behavior.
+CONF_TELEMETRY_REGISTER_TYPE: Final = "telemetry_register_type"
+TELEMETRY_REGISTER_AUTO: Final = "auto"
+TELEMETRY_REGISTER_INPUT: Final = "input"
+TELEMETRY_REGISTER_HOLDING: Final = "holding"
+TELEMETRY_REGISTER_TYPES: Final = (
+    TELEMETRY_REGISTER_AUTO,
+    TELEMETRY_REGISTER_INPUT,
+    TELEMETRY_REGISTER_HOLDING,
+)
+DEFAULT_TELEMETRY_REGISTER_TYPE: Final = TELEMETRY_REGISTER_AUTO
 
 # --- REST web API (opt-in; only used for the restart button) ----------------
 # The wallbox can be rebooted via its web UI. Modbus has no reboot register, so

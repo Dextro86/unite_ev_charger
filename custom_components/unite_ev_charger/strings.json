@@ -188,6 +188,8 @@
           "dlb_enabled": "Limit total load",
           "main_fuse_a": "Main fuse (A)",
           "dlb_margin_a": "Safety margin (A)",
+          "dlb_phases": "Grid phases",
+          "dlb_sensor_max_age": "Maximum sensor age (s)",
           "dlb_current_l1": "Grid current L1",
           "dlb_current_l2": "Grid current L2",
           "dlb_current_l3": "Grid current L3"
@@ -205,7 +207,10 @@
         "data": {
           "poll_interval": "Polling interval (s)",
           "failsafe_current": "Failsafe current (A)",
-          "failsafe_timeout": "Failsafe timeout (s)"
+          "failsafe_timeout": "Failsafe timeout (s)",
+          "increase_delay": "Current increase delay (s)",
+          "increase_step": "Current increase step (A)",
+          "telemetry_register_type": "Telemetry register type"
         }
       },
       "reboot": {
@@ -222,6 +227,8 @@
       "min_above_max": "Minimum current cannot be higher than the maximum.",
       "not_power": "That looks like an energy sensor (kWh). Please pick a power sensor (W/kW).",
       "dlb_needs_l1": "Enabling DLB requires at least the L1 grid current sensor.",
+      "dlb_needs_all_phases": "Enabling DLB requires a current sensor for every configured grid phase.",
+      "invalid_failsafe_current": "Failsafe current must be 0 A or at least 6 A.",
       "cannot_connect": "Cannot connect to the charger. Check the IP address, port and that Modbus TCP is enabled.",
       "unknown": "Unexpected error while connecting.",
       "invalid_auth": "Invalid web UI username or password.",
@@ -249,6 +256,13 @@
         "signed_grid": "HomeWizard P1 / signed grid power",
         "dsmr": "DSMR (import + export)",
         "surplus": "Surplus sensor"
+      }
+    },
+    "telemetry_register_type": {
+      "options": {
+        "auto": "Auto-detect",
+        "input": "Input registers (FC4)",
+        "holding": "Holding registers (FC3)"
       }
     }
   }

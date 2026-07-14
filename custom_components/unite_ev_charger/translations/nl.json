@@ -188,6 +188,8 @@
           "dlb_enabled": "Totale belasting beperken",
           "main_fuse_a": "Hoofdzekering (A)",
           "dlb_margin_a": "Veiligheidsmarge (A)",
+          "dlb_phases": "Netfasen",
+          "dlb_sensor_max_age": "Maximale sensorleeftijd (s)",
           "dlb_current_l1": "Netstroom L1",
           "dlb_current_l2": "Netstroom L2",
           "dlb_current_l3": "Netstroom L3"
@@ -205,7 +207,10 @@
         "data": {
           "poll_interval": "Polling-interval (s)",
           "failsafe_current": "Failsafe-stroom (A)",
-          "failsafe_timeout": "Failsafe-timeout (s)"
+          "failsafe_timeout": "Failsafe-timeout (s)",
+          "increase_delay": "Wachttijd stroomverhoging (s)",
+          "increase_step": "Stap stroomverhoging (A)",
+          "telemetry_register_type": "Telemetrieregistertype"
         }
       },
       "reboot": {
@@ -222,6 +227,8 @@
       "min_above_max": "Minimale stroom kan niet hoger zijn dan de maximale.",
       "not_power": "Dit lijkt een energie-sensor (kWh). Kies een vermogen-sensor (W/kW).",
       "dlb_needs_l1": "DLB inschakelen vereist minimaal de L1-netstroomsensor.",
+      "dlb_needs_all_phases": "DLB inschakelen vereist een stroomsensor voor elke ingestelde netfase.",
+      "invalid_failsafe_current": "Failsafe-stroom moet 0 A of minimaal 6 A zijn.",
       "cannot_connect": "Kan geen verbinding maken met de lader. Controleer het IP-adres, de poort en of Modbus TCP aan staat.",
       "unknown": "Onverwachte fout bij het verbinden.",
       "invalid_auth": "Ongeldige web-UI gebruikersnaam of wachtwoord.",
@@ -249,6 +256,13 @@
         "signed_grid": "HomeWizard P1 / netvermogen",
         "dsmr": "DSMR (import + export)",
         "surplus": "Overschot-sensor"
+      }
+    },
+    "telemetry_register_type": {
+      "options": {
+        "auto": "Automatisch detecteren",
+        "input": "Inputregisters (FC4)",
+        "holding": "Holdingregisters (FC3)"
       }
     }
   }

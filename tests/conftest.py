@@ -29,7 +29,17 @@ sys.modules["homeassistant.core"].HomeAssistant = object
 
 # Pure(-ish) modules that are safe to import this way (HA only via the stubs).
 # Order matters: a module must be loaded before others that import it.
-for _name in ("const", "units", "registers", "models", "control", "modbus", "inputs", "controller"):
+for _name in (
+    "const",
+    "units",
+    "registers",
+    "models",
+    "control",
+    "modbus",
+    "safety",
+    "inputs",
+    "controller",
+):
     _full = f"uec.{_name}"
     if _full not in sys.modules:
         _spec = importlib.util.spec_from_file_location(_full, PKG_DIR / f"{_name}.py")

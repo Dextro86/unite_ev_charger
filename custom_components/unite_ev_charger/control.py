@@ -9,6 +9,7 @@ HA-aware controller; this module only does the math.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 from .const import (
     MODE_FAST,
@@ -180,6 +181,18 @@ def dlb_cap_a(
     """
     caps = [fuse - margin - (g - c) for g, c in zip(grid_a, charger_a)]
     return min(caps) if caps else float("inf")
+
+
+def plausible_current(value: float, max_abs: float) -> bool:
+    """Return whether a signed current is finite and physically plausible."""
+    return isfinite(value) and abs(value) <= max_abs
+
+
+def normalize_failsafe_current(value: int, min_current: int = 6, max_current: int = 32) -> int:
+    """Clamp a failsafe to 0 (pause) or the charger's valid current range."""
+    if value <= 0:
+        return 0
+    return max(min_current, min(max_current, value))
 
 
 def desired_phases(

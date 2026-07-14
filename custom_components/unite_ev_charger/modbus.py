@@ -88,6 +88,10 @@ class WebastoModbus:
     async def read_holding_block(self, address: int, count: int) -> list[int]:
         return await self._read_block(RegType.HOLDING, address, count)
 
+    async def read_block(self, reg_type: RegType, address: int, count: int) -> list[int]:
+        """Read a block using an explicitly selected Modbus register area."""
+        return await self._read_block(reg_type, address, count)
+
     async def read_register(self, reg: RegisterDef) -> Any:
         block = await self._read_block(reg.reg_type, reg.address, reg.count)
         return decode_scalar(reg, block)

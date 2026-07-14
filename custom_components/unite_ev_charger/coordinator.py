@@ -15,17 +15,24 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from . import registers as R
 from .const import (
+    CONF_DLB_ENABLED,
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
     CONF_POLL_INTERVAL,
+    CONF_TELEMETRY_REGISTER_TYPE,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_TELEMETRY_REGISTER_TYPE,
     DOMAIN,
+    TELEMETRY_REGISTER_AUTO,
+    TELEMETRY_REGISTER_HOLDING,
+    TELEMETRY_REGISTER_INPUT,
 )
-from .control import effective_poll_interval
+from .control import effective_poll_interval, normalize_failsafe_current
 from .modbus import WebastoModbus, WebastoModbusError
 from .models import DeviceInfo, WallboxData, apply_session, parse_telemetry
+from .registers import RegType
 from .safety import program_failsafe, write_heartbeat
 
 _LOGGER = logging.getLogger(__name__)
@@ -50,6 +57,12 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         # Last restart attempt (recorded by the button, no polling).
         self.rest_last_restart_at: datetime | None = None
         self.rest_last_restart_result: str | None = None  # success/auth_failed/unreachable
+        self.telemetry_register_type: str | None = None
+        self.failsafe_configured: bool | None = None
+        self._telemetry_preference = entry.options.get(
+            CONF_TELEMETRY_REGISTER_TYPE,
+            DEFAULT_TELEMETRY_REGISTER_TYPE,
+        )
 
         poll = int(entry.options.get(
             CONF_POLL_INTERVAL,
@@ -102,7 +115,12 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
 
     async def _async_update_data(self) -> WallboxData:
         try:
-            telemetry = await self.client.read_input_block(R.TELEMETRY_BASE, R.TELEMETRY_COUNT)
+            # Claim a new connection before telemetry. This puts the charger at
+            # the configured failsafe current before normal control can resume.
+            if not self.client.connected:
+                await self.async_claim_connection()
+
+            telemetry = await self._read_telemetry_block()
             session = await self.client.read_input_block(R.SESSION_BASE, R.SESSION_COUNT)
             data = parse_telemetry(telemetry)
             apply_session(data, session)
@@ -131,9 +149,6 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             if self.client.take_new_connection():
                 await self._on_new_connection(data)
 
-            # Keep the failsafe watchdog happy.
-            await write_heartbeat(self.client)
-
             if self.controller is not None:
                 try:
                     await self.controller.async_apply(data)
@@ -149,6 +164,11 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                         "Charge control step failed; keeping monitoring alive"
                     )
 
+            # DLB with incomplete/stale inputs deliberately withholds Alive so
+            # the wallbox watchdog also enforces its configured failsafe.
+            if self.controller is None or self.controller.heartbeat_allowed:
+                await write_heartbeat(self.client)
+
             return data
         except WebastoModbusError as err:
             raise UpdateFailed(str(err)) from err
@@ -163,17 +183,60 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         freshly read ``phase_switch_raw`` is the reset default, used to skip a
         needless phase write when it already matches.
         """
-        await program_failsafe(
+        await self.async_claim_connection(data.phase_switch_raw)
+
+    async def async_claim_connection(self, phase_switch_raw: int | None = None) -> None:
+        """Program safety state immediately after opening a Modbus connection."""
+        failsafe_current = normalize_failsafe_current(
+            int(self.entry.options.get(CONF_FAILSAFE_CURRENT, DEFAULT_FAILSAFE_CURRENT_A))
+        )
+        self.failsafe_configured = await program_failsafe(
             self.client,
-            failsafe_current_a=int(
-                self.entry.options.get(CONF_FAILSAFE_CURRENT, DEFAULT_FAILSAFE_CURRENT_A)
-            ),
+            failsafe_current_a=failsafe_current,
             failsafe_timeout_s=int(
                 self.entry.options.get(CONF_FAILSAFE_TIMEOUT, DEFAULT_FAILSAFE_TIMEOUT_S)
             ),
+            required=bool(self.entry.options.get(CONF_DLB_ENABLED, False)),
         )
+        await self.client.write_register(R.SET_CURRENT_A, failsafe_current)
+        self.client.take_new_connection()
         if self.controller is not None:
-            await self.controller.async_on_reconnect(data.phase_switch_raw)
+            await self.controller.async_on_reconnect(phase_switch_raw)
+
+    async def _read_telemetry_block(self) -> list[int]:
+        """Read telemetry using configured or auto-detected register area."""
+        type_map = {
+            TELEMETRY_REGISTER_INPUT: RegType.INPUT,
+            TELEMETRY_REGISTER_HOLDING: RegType.HOLDING,
+        }
+        if self._telemetry_preference == TELEMETRY_REGISTER_AUTO:
+            first = self.telemetry_register_type or TELEMETRY_REGISTER_INPUT
+            second = (
+                TELEMETRY_REGISTER_HOLDING
+                if first == TELEMETRY_REGISTER_INPUT
+                else TELEMETRY_REGISTER_INPUT
+            )
+            candidates = (first, second)
+        else:
+            candidates = (self._telemetry_preference,)
+
+        last_error: WebastoModbusError | None = None
+        for candidate in candidates:
+            try:
+                block = await self.client.read_block(
+                    type_map[candidate],
+                    R.TELEMETRY_BASE,
+                    R.TELEMETRY_COUNT,
+                )
+            except WebastoModbusError as err:
+                last_error = err
+                continue
+            if self.telemetry_register_type != candidate:
+                _LOGGER.info("Using %s registers for charger telemetry", candidate)
+            self.telemetry_register_type = candidate
+            return block
+        assert last_error is not None
+        raise last_error
 
     @property
     def device_unique_id(self) -> str:

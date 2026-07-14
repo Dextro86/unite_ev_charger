@@ -37,6 +37,8 @@ async def async_get_config_entry_diagnostics(
         },
         "device": async_redact_data(asdict(coordinator.device), TO_REDACT),
         "modbus_stats": asdict(coordinator.client.stats),
+        "telemetry_register_type": coordinator.telemetry_register_type,
+        "failsafe_configured": coordinator.failsafe_configured,
         "wallbox": asdict(data) if data is not None else None,
         "last_update_success": coordinator.last_update_success,
         "rest": {
@@ -52,6 +54,9 @@ async def async_get_config_entry_diagnostics(
             "manual_current": controller.manual_current,
             "computed_setpoint": controller.computed_setpoint,
             "available_surplus_w": controller.available_surplus_w,
+            "dlb_healthy": controller.dlb_healthy,
+            "dlb_failure_reason": controller.dlb_failure_reason,
+            "heartbeat_allowed": controller.heartbeat_allowed,
             "recovery_status": controller.recovery_status,
             "recovery_active": controller.recovery_active,
             "recovery_remaining_s": controller.recovery_remaining_s,

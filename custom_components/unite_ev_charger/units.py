@@ -6,6 +6,8 @@ current to Amperes, and reject the wrong physical quantity instead of blowing up
 """
 from __future__ import annotations
 
+from math import isfinite
+
 _INVALID = {None, "", "unknown", "unavailable", "none"}
 ENERGY_UNITS = {"Wh", "kWh", "MWh"}
 _POWER_SCALE = {"W": 1.0, "kW": 1000.0, "MW": 1_000_000.0}
@@ -18,7 +20,8 @@ def _to_float(value: object) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        parsed = float(value)
+        return parsed if isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 
