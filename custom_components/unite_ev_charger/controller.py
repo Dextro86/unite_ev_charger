@@ -772,15 +772,21 @@ class ChargeControl:
                 return None, f"L{phase} charger current is implausible"
             grid_a.append(amps)
             charger_a.append(charger_current)
-        return (
-            ctrl.dlb_cap_a(
-                self.cfg.main_fuse_a,
-                self.cfg.dlb_margin_a,
-                grid_a,
-                charger_a,
-            ),
-            None,
+        cap = ctrl.dlb_cap_a(
+            self.cfg.main_fuse_a,
+            self.cfg.dlb_margin_a,
+            grid_a,
+            charger_a,
         )
+        _LOGGER.debug(
+            "DLB calculation: grid=%s A charger=%s A fuse=%s A margin=%s A cap=%.2f A",
+            grid_a,
+            charger_a,
+            self.cfg.main_fuse_a,
+            self.cfg.dlb_margin_a,
+            cap,
+        )
+        return cap, None
 
     def _set_dlb_health(self, healthy: bool | None, reason: str | None) -> None:
         previous = self.dlb_healthy
@@ -788,9 +794,15 @@ class ChargeControl:
         self.dlb_healthy = healthy
         self.dlb_failure_reason = reason
         if healthy is False and (previous is not False or previous_reason != reason):
-            _LOGGER.warning("DLB paused: %s; applying failsafe current", reason)
+            _LOGGER.warning(
+                "DLB paused: %s; applying %s A failsafe and withholding Alive",
+                reason,
+                self.cfg.failsafe_current,
+            )
         elif healthy is True and previous is False:
-            _LOGGER.info("DLB input recovered; normal control resumed")
+            _LOGGER.info(
+                "DLB input recovered; normal control and Alive heartbeat resumed"
+            )
 
     async def _apply_dlb_failsafe(self, data: WallboxData, reason: str) -> None:
         self._set_dlb_health(False, reason)

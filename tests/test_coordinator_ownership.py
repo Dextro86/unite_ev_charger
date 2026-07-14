@@ -40,12 +40,16 @@ class FakeClient:
             raise self.write_error
         self.writes.append((register.name, value))
 
+    def take_new_connection(self) -> bool:
+        return True
+
 
 def _coordinator(*, data: dict, current_limit: int = 20):
     coordinator = WebastoCoordinator.__new__(WebastoCoordinator)
     coordinator.hass = SimpleNamespace(config_entries=FakeConfigEntries())
-    coordinator.entry = SimpleNamespace(data=data)
+    coordinator.entry = SimpleNamespace(data=data, options={})
     coordinator.client = FakeClient(current_limit)
+    coordinator.controller = None
     return coordinator
 
 
@@ -109,6 +113,23 @@ def test_restore_failure_is_best_effort(caplog):
     assert restored is False
     assert coordinator.client.writes == []
     assert "Could not restore original charging-current limit to 20 A: offline" in caplog.text
+
+
+def test_claim_logs_effective_safety_values(caplog):
+    coordinator = _coordinator(data={})
+    coordinator.entry.options = {
+        "dlb_enabled": True,
+        "failsafe_current": 6,
+        "failsafe_timeout": 30,
+    }
+
+    with caplog.at_level(logging.INFO, logger="uec.coordinator"):
+        asyncio.run(coordinator.async_claim_connection())
+
+    assert (
+        "Claimed charger control: live limit=6 A, failsafe=6 A after 30 s"
+        in caplog.text
+    )
 
 
 def test_setup_captures_original_before_claiming_connection(monkeypatch):

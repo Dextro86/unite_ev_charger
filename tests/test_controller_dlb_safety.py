@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from types import SimpleNamespace
@@ -169,3 +170,37 @@ def test_implausible_grid_current_fails_closed():
 
     assert cap is None
     assert "implausible" in error
+
+
+def test_dlb_failure_and_recovery_logs_are_transition_only(caplog):
+    control, hass, _ = _control()
+    now = datetime.now(timezone.utc)
+    hass.states.set("sensor.grid_l1", 10, now)
+    hass.states.set("sensor.grid_l3", 10, now)
+
+    with caplog.at_level(logging.INFO, logger="uec.controller"):
+        asyncio.run(control.async_apply(_data()))
+        asyncio.run(control.async_apply(_data()))
+        _set_grid(hass, (10, 10, 10), datetime.now(timezone.utc))
+        asyncio.run(control.async_apply(_data(set_current=6)))
+
+    assert caplog.text.count("DLB paused:") == 1
+    assert "applying 6 A failsafe and withholding Alive" in caplog.text
+    assert (
+        "DLB input recovered; normal control and Alive heartbeat resumed"
+        in caplog.text
+    )
+
+
+def test_dlb_calculation_logs_inputs_and_cap_at_debug(caplog):
+    control, hass, _ = _control()
+    _set_grid(hass, (20, -2, 19), datetime.now(timezone.utc))
+
+    with caplog.at_level(logging.DEBUG, logger="uec.controller"):
+        cap, error = control._dlb_cap(_data(set_current=6))
+
+    assert error is None
+    assert cap == 8
+    assert "grid=[20.0, -2.0, 19.0] A" in caplog.text
+    assert "charger=[6.0, 6.0, 6.0] A" in caplog.text
+    assert "fuse=25 A margin=3 A cap=8.00 A" in caplog.text

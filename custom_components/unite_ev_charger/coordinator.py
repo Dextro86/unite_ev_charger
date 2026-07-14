@@ -238,15 +238,24 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         failsafe_current = normalize_failsafe_current(
             int(self.entry.options.get(CONF_FAILSAFE_CURRENT, DEFAULT_FAILSAFE_CURRENT_A))
         )
+        failsafe_timeout = int(
+            self.entry.options.get(CONF_FAILSAFE_TIMEOUT, DEFAULT_FAILSAFE_TIMEOUT_S)
+        )
         self.failsafe_configured = await program_failsafe(
             self.client,
             failsafe_current_a=failsafe_current,
-            failsafe_timeout_s=int(
-                self.entry.options.get(CONF_FAILSAFE_TIMEOUT, DEFAULT_FAILSAFE_TIMEOUT_S)
-            ),
+            failsafe_timeout_s=failsafe_timeout,
             required=bool(self.entry.options.get(CONF_DLB_ENABLED, False)),
         )
         await self.client.write_register(R.SET_CURRENT_A, failsafe_current)
+        _LOGGER.info(
+            "Claimed charger control: live limit=%s A, failsafe=%s A after %s s "
+            "(registers configured=%s)",
+            failsafe_current,
+            failsafe_current,
+            failsafe_timeout,
+            self.failsafe_configured,
+        )
         self.client.take_new_connection()
         if self.controller is not None:
             await self.controller.async_on_reconnect(phase_switch_raw)
