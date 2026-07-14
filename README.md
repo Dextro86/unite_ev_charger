@@ -180,6 +180,11 @@ integration follows that contract:
 - **Reconnect handshake** — a power-cycled or still-booting wallbox is picked up
   automatically: on the next successful poll the integration re-claims ownership
   (failsafe + charging current + phase + alive).
+- **Original current limit** — before its first ownership write, the integration
+  reads register `5004` and persists that exact value. Unload and removal restore
+  it before closing Modbus (best effort if the charger is unreachable). Reloads
+  never redefine the original value. Turning off DLB alone does not release
+  ownership because Fast, Manual and Solar modes still control `5004`.
 - **Robust 404 read** — the phase-capability register is re-read every cycle (a
   Unite can report it wrong while booting), so a single bad read never disables
   phase switching for the session.

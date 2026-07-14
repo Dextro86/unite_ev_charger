@@ -14,6 +14,7 @@ CONF_HOST: Final = "host"
 CONF_PORT: Final = "port"
 CONF_UNIT_ID: Final = "unit_id"
 CONF_POLL_INTERVAL: Final = "poll_interval"
+CONF_ORIGINAL_CURRENT_LIMIT: Final = "original_current_limit"
 
 DEFAULT_PORT: Final = 502
 # Vestel/Webasto firmware answers on Modbus unit id 255.

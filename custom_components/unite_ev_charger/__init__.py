@@ -33,9 +33,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = WebastoCoordinator(hass, entry, client)
 
     try:
+        # Capture 5004 before the ownership handshake replaces it with the
+        # failsafe. Persist it once so reloads never redefine "original".
+        await coordinator.async_capture_original_current_limit()
         await coordinator.async_claim_connection()
         await coordinator.async_read_device_info()
     except WebastoModbusError as err:
+        await coordinator.async_restore_original_current_limit()
         await client.async_close()
         raise ConfigEntryNotReady(f"Could not reach the charger: {err}") from err
 
@@ -62,5 +66,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator: WebastoCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
         if coordinator.controller is not None:
             await coordinator.controller.async_shutdown()
+        await coordinator.async_restore_original_current_limit()
         await coordinator.client.async_close()
     return unloaded

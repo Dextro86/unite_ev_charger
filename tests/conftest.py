@@ -22,10 +22,40 @@ sys.modules.setdefault("uec", _pkg)
 
 # Stub the handful of Home Assistant modules that controller.py / inputs.py
 # import only for type hints, so they can be loaded without a full HA install.
-for _mod in ("homeassistant", "homeassistant.config_entries", "homeassistant.core"):
+for _mod in (
+    "homeassistant",
+    "homeassistant.config_entries",
+    "homeassistant.core",
+    "homeassistant.exceptions",
+    "homeassistant.helpers",
+    "homeassistant.helpers.update_coordinator",
+):
     sys.modules.setdefault(_mod, types.ModuleType(_mod))
 sys.modules["homeassistant.config_entries"].ConfigEntry = object
 sys.modules["homeassistant.core"].HomeAssistant = object
+
+
+class _ConfigEntryNotReady(Exception):
+    pass
+
+
+sys.modules["homeassistant.exceptions"].ConfigEntryNotReady = _ConfigEntryNotReady
+
+
+class _DataUpdateCoordinator:
+    @classmethod
+    def __class_getitem__(cls, _item):
+        return cls
+
+
+class _UpdateFailed(Exception):
+    pass
+
+
+sys.modules[
+    "homeassistant.helpers.update_coordinator"
+].DataUpdateCoordinator = _DataUpdateCoordinator
+sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed = _UpdateFailed
 
 # Pure(-ish) modules that are safe to import this way (HA only via the stubs).
 # Order matters: a module must be loaded before others that import it.
@@ -38,6 +68,7 @@ for _name in (
     "modbus",
     "safety",
     "inputs",
+    "coordinator",
     "controller",
 ):
     _full = f"uec.{_name}"
@@ -46,3 +77,10 @@ for _name in (
         _mod = importlib.util.module_from_spec(_spec)
         sys.modules[_full] = _mod
         _spec.loader.exec_module(_mod)
+
+_integration_spec = importlib.util.spec_from_file_location(
+    "uec.integration", PKG_DIR / "__init__.py"
+)
+_integration = importlib.util.module_from_spec(_integration_spec)
+sys.modules["uec.integration"] = _integration
+_integration_spec.loader.exec_module(_integration)

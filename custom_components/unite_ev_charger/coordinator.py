@@ -15,9 +15,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from . import registers as R
 from .const import (
+    ABS_MAX_CURRENT_A,
     CONF_DLB_ENABLED,
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
+    CONF_ORIGINAL_CURRENT_LIMIT,
     CONF_POLL_INTERVAL,
     CONF_TELEMETRY_REGISTER_TYPE,
     DEFAULT_FAILSAFE_CURRENT_A,
@@ -112,6 +114,52 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         max_a = await _try(R.MAX_CURRENT_CABLE_A)
         if max_a:
             self.device.max_current_a = int(max_a)
+
+    async def async_capture_original_current_limit(self) -> int:
+        """Persist register 5004 once, before this integration takes ownership."""
+        stored = self.entry.data.get(CONF_ORIGINAL_CURRENT_LIMIT)
+        if stored is not None:
+            _LOGGER.info("Using stored original charging-current limit: %s A", stored)
+            return int(stored)
+
+        original = int(await self.client.read_register(R.SET_CURRENT_A))
+        if not 0 <= original <= ABS_MAX_CURRENT_A:
+            raise WebastoModbusError(
+                f"Original charging-current limit {original} is outside "
+                f"0..{ABS_MAX_CURRENT_A} A"
+            )
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            data={**self.entry.data, CONF_ORIGINAL_CURRENT_LIMIT: original},
+        )
+        _LOGGER.info(
+            "Captured original charging-current limit from register 5004: %s A",
+            original,
+        )
+        return original
+
+    async def async_restore_original_current_limit(self) -> bool:
+        """Best-effort restoration of register 5004 before releasing ownership."""
+        original = self.entry.data.get(CONF_ORIGINAL_CURRENT_LIMIT)
+        if original is None:
+            _LOGGER.warning(
+                "Cannot restore charging-current limit: original value is missing"
+            )
+            return False
+        try:
+            await self.client.write_register(R.SET_CURRENT_A, int(original))
+        except WebastoModbusError as err:
+            _LOGGER.warning(
+                "Could not restore original charging-current limit to %s A: %s",
+                original,
+                err,
+            )
+            return False
+        _LOGGER.info(
+            "Restored original charging-current limit to register 5004: %s A",
+            original,
+        )
+        return True
 
     async def _async_update_data(self) -> WallboxData:
         try:
