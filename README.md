@@ -90,9 +90,9 @@ The options are a menu — edit a section, return, and **Save & close** once.
 | **Connection** | Charger IP, port, Modbus unit id |
 | **Charging** | Charging control (built-in / external evcc), default mode, min/max current, enable phase switching, optional 1→3 phase recovery |
 | **Power meter** | How you measure grid/solar power — HomeWizard P1 (signed), DSMR (import+export), a ready-made surplus sensor, or none. Shared by Solar and DLB. |
-| **Dynamic Load Balancing** | Enable, main fuse (A), safety margin, per-phase grid current sensors (L1 required; L2/L3 for a 3-phase connection) |
+| **Dynamic Load Balancing** | Enable, grid phase count, main fuse (A), safety margin, maximum sensor age, and one grid-current sensor per phase |
 | **Solar** | Minimum solar current, automatic phase-switch dwell |
-| **Advanced** | Polling interval, failsafe current & timeout |
+| **Advanced** | Polling interval, failsafe current & timeout, increase delay/step, telemetry register type |
 | **Restart (web UI)** | Enable the web-UI login (username/password) to expose the Restart button |
 
 > **Power vs energy:** the meter screens only accept **power** sensors (W/kW).
@@ -107,6 +107,32 @@ uses the charger's measured voltage (falling back to a configurable nominal).
 On each phase the room for the car is `fuse − margin − (grid current − charger
 current)`; the cap is the lowest across the phases the car charges on. This is the
 same approach evcc uses.
+
+DLB is fail-closed. Every configured grid phase must have a finite, plausible,
+fresh current reading received after this integration started. If any required
+reading is missing, stale or invalid, the integration immediately applies the
+configured failsafe current and stops the Alive heartbeat. The wallbox watchdog
+therefore also falls back to its failsafe current if the meter remains unhealthy.
+Normal control resumes only after a complete fresh snapshot is available.
+Enabling DLB therefore also requires working failsafe registers `2000` and
+`2002`; setup/reconnect fails closed if the charger rejects that handshake.
+
+Choose **1 phase** only for a genuinely single-phase grid connection. A 3-phase
+connection requires L1, L2 and L3. Signed readings are preserved: negative export
+creates headroom on that phase and is never converted to an absolute value.
+
+Reductions are immediate, including during the post-phase-switch quiet period.
+Increases wait for the configured stable-headroom delay and then advance by at
+most the configured step each cycle. Solar anti-short-cycle behavior never
+overrides a DLB reduction or stop.
+
+### Telemetry register type
+
+Unite firmware variants expose the `1000..1037` telemetry block through input
+registers (FC4), holding registers (FC3), or both. **Auto-detect** tries input
+registers first and falls back to holding registers after a Modbus exception.
+Select the explicit type under **Advanced** if unsupported reads return zeros
+instead of an exception. Control registers remain holding registers.
 
 ## Phase switching
 
@@ -141,7 +167,8 @@ The Vestel firmware expects the master to *own* the connection, and the
 integration follows that contract:
 
 - **Failsafe** — on every new connection it writes the failsafe current + timeout,
-  then an **alive** heartbeat each cycle. If the heartbeat lapses past the timeout,
+  puts the live current limit at the failsafe value, then sends an **alive**
+  heartbeat only while control inputs are healthy. If the heartbeat lapses past the timeout,
   the wallbox drops to its failsafe current and **closes the socket** itself.
 - **Heartbeat cadence** — the alive register must be refreshed faster than
   `failsafe_timeout / 2`, so the effective poll interval is clamped to
