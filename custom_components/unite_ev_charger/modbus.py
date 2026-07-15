@@ -68,9 +68,10 @@ class WebastoModbus:
     def take_new_connection(self) -> bool:
         """Return True exactly once after a new connection was established.
 
-        The wallbox resets its ownership registers (failsafe + charging current)
-        on every new Modbus connection, so the coordinator uses this to re-run
-        the required handshake on first connect and after each reconnect.
+        Vestel requires the master to set failsafe current, failsafe timeout,
+        charging current, and Alive immediately after each new connection. That
+        requirement does not prove readable values or register 405 reset on
+        connection, so the coordinator conservatively re-runs the handshake.
         """
         if self._new_connection:
             self._new_connection = False

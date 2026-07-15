@@ -63,6 +63,11 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
 
 ## Installation
 
+HACS is optional. For this `0.2.0-dev.2` commissioning build, install the
+`codex/dlb-safety-hardening` branch manually: download that branch, copy
+`custom_components/unite_ev_charger` into Home Assistant's
+`config/custom_components/` directory, and restart Home Assistant.
+
 ### HACS
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Dextro86&repository=unite_ev_charger&category=integration)
@@ -75,6 +80,33 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
 
 Copy `custom_components/unite_ev_charger` into your Home Assistant
 `config/custom_components/` directory and restart.
+
+## EV-unplugged commissioning
+
+This fork build is ready only for an **EV-unplugged commissioning run**. Live
+charging remains blocked until restoration evidence from the user's Unite
+matches exactly.
+
+1. Keep the vehicle unplugged for the entire commissioning run.
+2. Add the integration. Verify **Automatic charger control** stays **OFF** and
+   that no Modbus TCP session opens.
+3. Return the charger to the desired autonomous configuration.
+4. Enable **Automatic charger control** once. Record every value from the
+   `Captured original charger configuration` log: registers `5004`, `2000`,
+   `2002`, and `405` (when owned).
+5. Exercise each release path: disable control, enable then disable it a second
+   time, enable then restart Home Assistant, and finally unload the integration
+   once after Home Assistant returns.
+6. After every release, compare the `Verified original register` log values for
+   `5004`, `2000`, `2002`, and `405` with the captured originals. If checking
+   independently, connect only after the integration has closed its Modbus
+   session.
+7. Do not test live charging unless every restore matches exactly after every
+   release.
+
+TCP first-connect passivity has not yet been proven on physical hardware. An
+unreachable or powered-off charger cannot be restored by software; the ownership
+journal remains dirty so manual recovery evidence is not lost.
 
 ## Setup
 
@@ -167,8 +199,8 @@ diagnostic sensors show the recovery state and remaining time.
 > **soft reset** of the charger, which you can trigger from the
 > [Restart button](#restart-button-web-ui).
 
-Note: register `405` resets to its `404` default on **every** Modbus disconnect
-(see below), so the integration re-asserts the desired phase after each reconnect.
+Reconnects can expose a phase value different from control intent, so the
+integration conservatively re-asserts the desired phase when needed.
 
 ## Modbus ownership, failsafe & reconnect
 
@@ -190,17 +222,17 @@ never reported as a successful release.
 
 The remaining connection contract is:
 
-- **Failsafe** — on every new connection it writes the failsafe current + timeout,
-  puts the live current limit at the failsafe value, then sends an **alive**
-  heartbeat only while control inputs are healthy. If the heartbeat lapses past the timeout,
-  the wallbox drops to its failsafe current and **closes the socket** itself.
+- **Required connection programming** — Vestel requires the master to set
+  failsafe current, failsafe timeout, charging current, and Alive immediately
+  after each new connection. The integration sends Alive only while control
+  inputs are healthy; after the timeout, the wallbox uses its failsafe current.
 - **Heartbeat cadence** — the alive register must be refreshed faster than
   `failsafe_timeout / 2`, so the effective poll interval is clamped to
   `min(poll, max(3 s, timeout/2))`, whatever you configure.
-- **Register 405 resets on disconnect** — per the spec, the phase register returns
-  to its `404` default on any TCP disconnect, power cycle or reset. After each
-  reconnect the integration re-asserts the intended phase (and the charging
-  current), so a brief drop never silently changes your phase.
+- **Defensive reconnect reassertion** — the official protocol does not prove
+  readable pre-connect values reset, and does not prove register `405` resets.
+  Reconnect behavior still warrants conservatively re-asserting intended phase
+  and charging current when ownership resumes.
 - **Reconnect handshake** — a power-cycled or still-booting wallbox is picked up
   automatically: on the next successful poll the integration re-claims ownership
   (failsafe + charging current + phase + alive).
@@ -210,7 +242,7 @@ The remaining connection contract is:
   snapshot and never recaptures integration-modified values as originals.
 - **Suspended means autonomous** — Modbus is closed and charger-backed entities
   are unavailable. Passive reads are not attempted because a Unite Modbus
-  session cannot yet be proven not to affect EMS state.
+  TCP first connection cannot yet be proven not to affect EMS state.
 - **Robust 404 read** — the phase-capability register is re-read every cycle (a
   Unite can report it wrong while booting), so a single bad read never disables
   phase switching for the session.

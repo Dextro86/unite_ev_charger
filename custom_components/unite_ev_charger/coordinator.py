@@ -143,8 +143,8 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         failsafe_timeout = int(
             entry.options.get(CONF_FAILSAFE_TIMEOUT, DEFAULT_FAILSAFE_TIMEOUT_S)
         )
-        # Never poll slower than the Alive heartbeat needs: the Unite drops the
-        # socket + resets register 405 if Alive lapses past the failsafe timeout.
+        # Never poll slower than the Alive heartbeat needs. Conservative cadence
+        # avoids triggering the configured hardware failsafe.
         effective_poll = effective_poll_interval(poll, failsafe_timeout)
         if effective_poll != poll:
             _LOGGER.debug(
@@ -568,9 +568,9 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             except WebastoModbusError:
                 data.phase_capability_raw = self.device.phases_supported
 
-            # First connect or a reconnect after the wallbox dropped us: the
-            # Unite resets its failsafe + charging-current registers on every new
-            # Modbus connection, so re-assert ownership before the heartbeat.
+            # Vestel requires the master to set failsafe current, failsafe
+            # timeout, charging current, and Alive immediately after each new
+            # connection. Re-run it before normal control resumes.
             if self.client.take_new_connection():
                 await self._on_new_connection(data)
 
@@ -609,12 +609,11 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
     async def _on_new_connection(self, data: WallboxData) -> None:
         """Run the ownership handshake the wallbox expects on a fresh connection.
 
-        Per the Vestel spec the wallbox resets failsafe, charging current *and*
-        the phase register (405 -> 404 default) on every new Modbus connection.
-        So we set failsafe current/timeout immediately, then let the controller
-        restore the charging current and (in evcc mode) the requested phase. The
-        freshly read ``phase_switch_raw`` is the reset default, used to skip a
-        needless phase write when it already matches.
+        Vestel requires the master to set failsafe current, failsafe timeout,
+        charging current, and Alive immediately after each new connection. It
+        does not prove readable pre-connect values or register 405 reset.
+        Reassertion remains a conservative defense: ``phase_switch_raw`` is the
+        observed live value, used to skip a needless write when it matches intent.
         """
         await self.async_claim_connection(data.phase_switch_raw)
 

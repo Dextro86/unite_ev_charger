@@ -215,31 +215,30 @@ def test_on_reconnect_internal_invalidates_setpoint_cache():
     assert client.writes == []          # handshake itself writes nothing internally
 
 
-def test_on_reconnect_reasserts_evcc_phase_after_405_reset():
-    """The wallbox resets 405 to its 404 default on disconnect; evcc's requested
-    phase must be restored (evcc's own select shows intent, so it won't self-fix)."""
+def test_on_reconnect_reasserts_evcc_phase_when_live_value_differs():
+    """Reconnect reasserts evcc intent when observed register 405 differs."""
     ctl, client, _ = _control()  # external
 
     async def run():
         await ctl.async_external_set_phase(3)  # evcc requested 3-phase
         client.writes.clear()
-        await ctl.async_on_reconnect(0)  # wallbox reset to default 1-phase (raw 0)
+        await ctl.async_on_reconnect(0)  # observed live value is 1-phase (raw 0)
         return list(client.writes)
 
     # current restored (0, no intent yet) + phase re-asserted to 3-phase (405=1)
     assert asyncio.run(run()) == [("set_current_a", 0), ("phase_switch", 1)]
 
 
-def test_on_reconnect_skips_phase_write_when_default_matches():
+def test_on_reconnect_skips_phase_write_when_live_value_matches():
     ctl, client, _ = _control()  # external
 
     async def run():
         await ctl.async_external_set_phase(3)  # wants 3-phase
         client.writes.clear()
-        await ctl.async_on_reconnect(1)  # wallbox default already 3-phase (raw 1)
+        await ctl.async_on_reconnect(1)  # observed live value is 3-phase (raw 1)
         return [w for w in client.writes if w[0] == "phase_switch"]
 
-    assert asyncio.run(run()) == []  # no CP blip when the reset default matches
+    assert asyncio.run(run()) == []  # no CP blip when live value matches
 
 
 def test_on_reconnect_internal_does_not_write_phase():

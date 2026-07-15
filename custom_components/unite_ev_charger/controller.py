@@ -373,9 +373,9 @@ class ChargeControl:
     async def async_on_reconnect(self, phase_raw: int | None) -> None:
         """Re-assert charging current AND phase after a fresh Modbus connection.
 
-        Per the Vestel spec the wallbox resets register 405 (phase) to its 404
-        default *and* its charging-current register on every Modbus disconnection,
-        so we restore both instead of silently running on the wallbox defaults.
+        The protocol requires fresh connection programming but does not prove
+        readable values or register 405 reset. Reassert saved intent defensively
+        so observed reconnect behavior cannot silently change current or phase.
         """
         await self._reassert_current_on_reconnect()
         await self._reassert_phase_on_reconnect(phase_raw)
@@ -400,19 +400,18 @@ class ChargeControl:
             self._last_setpoint = None
 
     async def _reassert_phase_on_reconnect(self, phase_raw: int | None) -> None:
-        """Restore the desired phase: the wallbox reset register 405 to its 404
-        default on the disconnect (per spec).
+        """Restore desired phase when reconnect exposes a different live value.
 
         Internal mode's control loop re-evaluates the phase this same cycle, so
         only the external (evcc) path needs an explicit re-assert - and only when
-        the reset default actually differs from evcc's request, to avoid a
-        needless CP interruption.
+        the observed value differs from evcc's request, avoiding needless CP
+        interruption.
         """
         if not self.is_external or self._requested_phase not in (PHASE_1P, PHASE_3P):
             return
         desired_raw = 1 if self._requested_phase == PHASE_3P else 0
         if phase_raw == desired_raw:
-            return  # reset default already matches -> no write, no CP blip
+            return  # observed value already matches -> no write, no CP blip
         await self.coordinator.client.write_register(R.PHASE_SWITCH, desired_raw)
 
     async def async_shutdown(self) -> None:

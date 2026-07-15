@@ -11,7 +11,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 import uec.coordinator as coordinator_module
 from uec import registers as R
 from uec import integration
-from uec.coordinator import OwnershipState, WebastoCoordinator
+from uec.coordinator import OriginalChargerConfig, OwnershipState, WebastoCoordinator
 from uec.modbus import WebastoModbusError
 
 
@@ -234,6 +234,34 @@ def test_activation_persists_complete_snapshot_before_first_write():
     assert coordinator.entry.data["original_failsafe_timeout"] == 45
     assert coordinator.entry.data["original_phase_switch"] == 0
     assert _state(coordinator) == "active"
+
+
+def test_dirty_snapshot_survives_reconnect_reset_values():
+    coordinator, client, _events = _coordinator(
+        data={
+            "automatic_control": True,
+            "ownership_dirty": True,
+            "original_current_limit": 20,
+            "original_failsafe_current": 12,
+            "original_failsafe_timeout": 45,
+            "original_phase_switch": 0,
+        }
+    )
+    client.values.update(
+        {
+            R.SET_CURRENT_A.name: 6,
+            R.FAILSAFE_CURRENT_A.name: 6,
+            R.FAILSAFE_TIMEOUT_S.name: 30,
+        }
+    )
+    client.events.clear()
+
+    asyncio.run(coordinator.async_activate())
+
+    assert coordinator.original_configuration == OriginalChargerConfig(
+        20, 12, 45, 0
+    )
+    assert not any(event[0] == "read" for event in client.events)
 
 
 def test_disable_restores_verifies_then_closes_and_clears_snapshot():

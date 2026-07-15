@@ -88,12 +88,9 @@ class Limits:
 def effective_poll_interval(poll_interval: int, failsafe_timeout: int) -> int:
     """Clamp the poll interval so the Alive heartbeat is refreshed fast enough.
 
-    The Unite drops the Modbus socket (and resets register 405 to its default)
-    if it does not see an Alive refresh within the failsafe timeout; the spec
-    recommends refreshing every ``timeout/2`` (floor 3 s). We write the heartbeat
-    once per poll, so the poll must never be slower than that - otherwise a slow
-    poll causes spurious failsafe + phase resets. The user's configured value is
-    kept; this only makes the effective tick faster when needed.
+    Vestel requires Alive after connection and within the failsafe timeout. We
+    refresh every ``timeout/2`` (floor 3 s). The user's configured value is kept;
+    this only makes the effective tick faster when needed.
     """
     return min(poll_interval, max(3, failsafe_timeout // 2))
 
