@@ -38,14 +38,6 @@ def test_failsafe_programming_failure_propagates():
     client = FakeClient(fail_on="failsafe_current_a")
 
     with pytest.raises(WebastoModbusError):
-        asyncio.run(program_failsafe(client, required=True))
+        asyncio.run(program_failsafe(client))
 
     assert client.writes == [("failsafe_current_a", 6)]
-
-
-def test_optional_failsafe_failure_is_reported_without_blocking_other_modes():
-    client = FakeClient(fail_on="failsafe_current_a")
-
-    result = asyncio.run(program_failsafe(client))
-
-    assert result is False

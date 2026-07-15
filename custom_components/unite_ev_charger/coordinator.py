@@ -14,6 +14,7 @@ from enum import Enum
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import registers as R
@@ -22,7 +23,6 @@ from .const import (
     CONF_AUTOMATIC_CONTROL,
     CONF_BASELINE_REQUIRED,
     CONF_CONTROL_MODE,
-    CONF_DLB_ENABLED,
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
     CONF_HOST,
@@ -84,6 +84,12 @@ _SNAPSHOT_KEYS = (
     CONF_ORIGINAL_FAILSAFE_TIMEOUT,
     CONF_ORIGINAL_PHASE_SWITCH,
 )
+_OWNERSHIP_KEYS = (
+    CONF_AUTOMATIC_CONTROL,
+    CONF_OWNERSHIP_DIRTY,
+    *_SNAPSHOT_KEYS,
+)
+_OWNERSHIP_STORE_VERSION = 1
 
 
 class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
@@ -100,6 +106,11 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         self.device = DeviceInfo()
         self.controller = None  # wired in once control is built
         self._ownership_lock = asyncio.Lock()
+        self._ownership_store = Store(
+            hass,
+            _OWNERSHIP_STORE_VERSION,
+            f"{DOMAIN}.{entry.entry_id}.ownership",
+        )
         self._ownership_state = (
             OwnershipState.ERROR
             if entry.data.get(CONF_OWNERSHIP_DIRTY)
@@ -210,7 +221,41 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         if callable(update_listeners):
             update_listeners()
 
-    def _persist_ownership_data(
+    @staticmethod
+    def _ownership_record(data: dict) -> dict[str, object]:
+        record: dict[str, object] = {
+            CONF_AUTOMATIC_CONTROL: bool(data.get(CONF_AUTOMATIC_CONTROL, True)),
+            CONF_OWNERSHIP_DIRTY: bool(data.get(CONF_OWNERSHIP_DIRTY, False)),
+        }
+        if record[CONF_OWNERSHIP_DIRTY]:
+            for key in _SNAPSHOT_KEYS:
+                if key in data:
+                    record[key] = data[key]
+        return record
+
+    async def async_load_ownership_record(self) -> None:
+        """Load the durable journal before setup decides whether to connect."""
+        store = getattr(self, "_ownership_store", None)
+        if store is None:
+            return
+        record = await store.async_load()
+        if not isinstance(record, dict):
+            if any(key in self.entry.data for key in _OWNERSHIP_KEYS):
+                await store.async_save(self._ownership_record(self.entry.data))
+            return
+        data = dict(self.entry.data)
+        for key in _OWNERSHIP_KEYS:
+            data.pop(key, None)
+        data.update({key: record[key] for key in _OWNERSHIP_KEYS if key in record})
+        if data != self.entry.data:
+            self.hass.config_entries.async_update_entry(self.entry, data=data)
+        self._ownership_state = (
+            OwnershipState.ERROR
+            if data.get(CONF_OWNERSHIP_DIRTY)
+            else OwnershipState.DISABLED
+        )
+
+    async def _persist_ownership_data(
         self,
         updates: dict[str, object],
         *,
@@ -220,6 +265,9 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         data.update(updates)
         for key in remove:
             data.pop(key, None)
+        store = getattr(self, "_ownership_store", None)
+        if store is not None:
+            await store.async_save(self._ownership_record(data))
         if data == self.entry.data:
             return
         self.hass.config_entries.async_update_entry(self.entry, data=data)
@@ -284,7 +332,10 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         }
         if phase is not None:
             updates[CONF_ORIGINAL_PHASE_SWITCH] = phase
-        self._persist_ownership_data(updates, remove=(CONF_BASELINE_REQUIRED,))
+        await self._persist_ownership_data(
+            updates,
+            remove=(CONF_BASELINE_REQUIRED,),
+        )
         _LOGGER.info(
             "Captured original charger configuration: register 5004=%s A, "
             "2000=%s A, 2002=%s s, 405=%s",
@@ -311,7 +362,10 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                 if original is None:
                     original = await self._async_capture_original_configuration()
                 else:
-                    self._persist_ownership_data({CONF_AUTOMATIC_CONTROL: True})
+                    await self._persist_ownership_data(
+                        {CONF_AUTOMATIC_CONTROL: True},
+                        remove=(CONF_BASELINE_REQUIRED,),
+                    )
                     _LOGGER.info(
                         "Resuming EMS ownership with stored originals: "
                         "5004=%s A, 2000=%s A, 2002=%s s, 405=%s",
@@ -340,7 +394,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
 
     async def _async_restore_locked(self, *, preserve_requested: bool) -> bool:
         if not preserve_requested and self.automatic_control_requested:
-            self._persist_ownership_data({CONF_AUTOMATIC_CONTROL: False})
+            await self._persist_ownership_data({CONF_AUTOMATIC_CONTROL: False})
 
         original = self.original_configuration
         if original is None:
@@ -398,7 +452,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             return False
 
         await self.client.async_close()
-        self._persist_ownership_data(
+        await self._persist_ownership_data(
             {CONF_OWNERSHIP_DIRTY: False},
             remove=_SNAPSHOT_KEYS,
         )
@@ -524,7 +578,6 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             self.client,
             failsafe_current_a=failsafe_current,
             failsafe_timeout_s=failsafe_timeout,
-            required=bool(self.entry.options.get(CONF_DLB_ENABLED, False)),
         )
         await self.client.write_register(R.SET_CURRENT_A, failsafe_current)
         _LOGGER.info(

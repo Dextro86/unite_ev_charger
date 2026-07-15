@@ -62,7 +62,9 @@ resume. A prior explicit switch state is persisted and wins over the default.
 
 ## Persistent ownership record
 
-Persist lifecycle data in config-entry data, separate from user options:
+Persist lifecycle data in an atomic Home Assistant storage journal, separate
+from user options. Mirror the journal into config-entry data for diagnostics and
+migration visibility:
 
 - requested automatic-control state
 - ownership-session dirty flag
@@ -71,10 +73,14 @@ Persist lifecycle data in config-entry data, separate from user options:
 - original register 2002 failsafe timeout
 - original register 405 phase selection when phase control may modify it
 
-The update listener must distinguish internal ownership-record updates from
-option changes. Internal persistence must not trigger a config-entry reload.
+The storage journal is authoritative after restart. Setup loads it before
+deciding whether to connect. The config-entry update listener must distinguish
+mirror updates from option changes; internal persistence must not trigger a
+reload.
 
-The dirty flag is written with the complete snapshot before any charger write.
+The dirty flag and complete snapshot are atomically saved before any charger
+write. Updating only config-entry memory is insufficient because its disk save
+may be delayed.
 It remains set for the whole ownership session. It is cleared, and the snapshot
 removed, only after successful restore verification and connection closure.
 

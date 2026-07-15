@@ -16,7 +16,7 @@ from .const import (
     DEFAULT_FAILSAFE_TIMEOUT_S,
     HEARTBEAT_ALIVE_VALUE,
 )
-from .modbus import WebastoModbus, WebastoModbusError
+from .modbus import WebastoModbus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,30 +26,21 @@ async def program_failsafe(
     *,
     failsafe_current_a: int = DEFAULT_FAILSAFE_CURRENT_A,
     failsafe_timeout_s: int = DEFAULT_FAILSAFE_TIMEOUT_S,
-    required: bool = False,
 ) -> bool:
     """Configure the charger's failsafe current and timeout.
 
     Current is written before enabling/changing the timeout so a partial
-    handshake can never arm a watchdog with an unknown fallback current.
-    DLB callers set ``required`` because continuing to send heartbeats without
-    a confirmed failsafe would defeat that safety contract. Other modes retain
-    compatibility with firmware that does not implement these registers.
+    handshake can never arm a watchdog with an unknown fallback current. Any
+    rejected write aborts ownership for every control strategy.
     """
-    try:
-        await client.write_register(R.FAILSAFE_CURRENT_A, failsafe_current_a)
-        await client.write_register(R.FAILSAFE_TIMEOUT_S, failsafe_timeout_s)
-        _LOGGER.debug(
-            "Programmed failsafe: %s A after %s s timeout",
-            failsafe_current_a,
-            failsafe_timeout_s,
-        )
-        return True
-    except WebastoModbusError as err:
-        _LOGGER.warning("Could not program failsafe registers: %s", err)
-        if required:
-            raise
-        return False
+    await client.write_register(R.FAILSAFE_CURRENT_A, failsafe_current_a)
+    await client.write_register(R.FAILSAFE_TIMEOUT_S, failsafe_timeout_s)
+    _LOGGER.debug(
+        "Programmed failsafe: %s A after %s s timeout",
+        failsafe_current_a,
+        failsafe_timeout_s,
+    )
+    return True
 
 
 async def write_heartbeat(client: WebastoModbus) -> None:

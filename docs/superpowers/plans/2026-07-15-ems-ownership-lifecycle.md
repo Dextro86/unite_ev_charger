@@ -4,14 +4,14 @@
 
 **Goal:** Make Webasto EMS ownership explicit, persistent, reversible, and safe across disable, reload, unload, shutdown, removal, communication failure, and restart.
 
-**Architecture:** `WebastoCoordinator` owns one serialized lifecycle state machine and persists one per-session register snapshot in config-entry data. One always-available switch changes requested ownership; every other write and poll requires Active state. Existing DLB and charge modes stay controller policies inside an active ownership session.
+**Architecture:** `WebastoCoordinator` owns one serialized lifecycle state machine and atomically journals one per-session register snapshot with Home Assistant `Store`, mirrored into config-entry data. One always-available switch changes requested ownership; every other write and poll requires Active state. Existing DLB and charge modes stay controller policies inside an active ownership session.
 
 **Tech Stack:** Python 3.12, Home Assistant custom integration APIs, pymodbus, pytest, asyncio.
 
 ## Global Constraints
 
 - Never invent original values for registers 5004, 2000, 2002, or 405.
-- Persist a complete dirty snapshot before the first charger write.
+- Atomically persist a complete dirty snapshot before the first charger write.
 - Keep Alive active until orderly restoration has been read-verified.
 - Use no Victron-specific logic and add no dependency.
 - Preserve requested ON across reload, unload, and shutdown; user disable persists OFF.

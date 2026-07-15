@@ -31,6 +31,7 @@ for _mod in (
     "homeassistant.exceptions",
     "homeassistant.helpers",
     "homeassistant.helpers.issue_registry",
+    "homeassistant.helpers.storage",
     "homeassistant.helpers.update_coordinator",
 ):
     sys.modules.setdefault(_mod, types.ModuleType(_mod))
@@ -49,6 +50,20 @@ sys.modules["homeassistant.helpers.issue_registry"].async_delete_issue = lambda 
 sys.modules["homeassistant.helpers"].issue_registry = sys.modules[
     "homeassistant.helpers.issue_registry"
 ]
+
+
+class _Store:
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    async def async_load(self):
+        return None
+
+    async def async_save(self, _data) -> None:
+        pass
+
+
+sys.modules["homeassistant.helpers.storage"].Store = _Store
 
 
 class _ConfigEntryNotReady(Exception):

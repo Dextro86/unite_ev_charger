@@ -1,11 +1,9 @@
 """Config + options flow for Unite EV Charger.
 
-The setup step is deliberately minimal and bounded (just a connection test, so
-it cannot hang). All feature configuration lives in the options flow, which is
-menu-driven: you edit one section, return to the menu, edit another, and save
-once at the end. Power/current sensors are picked with filtered entity
-selectors, and we additionally reject energy sensors - the exact mistake that
-used to crash the old integration.
+The setup step deliberately performs no Modbus I/O: the ownership lifecycle
+must capture the charger's original configuration before any session can affect
+it. All feature configuration lives in the menu-driven options flow. Power and
+current sensors use filtered entity selectors, and energy sensors are rejected.
 """
 from __future__ import annotations
 
@@ -23,7 +21,6 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from . import registers as R
 from .const import (
     CHARGE_MODES,
     CONF_CONTROL_MODE,
@@ -97,7 +94,6 @@ from .const import (
     NOMINAL_VOLTAGE,
     TELEMETRY_REGISTER_TYPES,
 )
-from .modbus import WebastoModbus, WebastoModbusError
 from .rest_client import UniteRestAuthError, UniteRestError, async_build_rest_client
 from .units import ENERGY_UNITS
 
@@ -170,31 +166,15 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
-
         if user_input is not None:
-            client = WebastoModbus(
-                host=user_input[CONF_HOST],
-                port=user_input[CONF_PORT],
-                unit_id=user_input[CONF_UNIT_ID],
+            unique = (
+                f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}:"
+                f"{user_input[CONF_UNIT_ID]}"
             )
-            serial: Any = None
-            try:
-                serial = await client.read_register(R.SERIAL_NUMBER)
-            except WebastoModbusError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001 - never let setup hang/crash
-                errors["base"] = "unknown"
-            finally:
-                await client.async_close()
-
-            if not errors:
-                serial_str = str(serial).strip() if serial else ""
-                unique = serial_str or f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}"
-                await self.async_set_unique_id(unique)
-                self._abort_if_unique_id_configured()
-                title = user_input.get(CONF_NAME) or "Unite EV Charger"
-                return self.async_create_entry(title=title, data=user_input)
+            await self.async_set_unique_id(unique)
+            self._abort_if_unique_id_configured()
+            title = user_input.get(CONF_NAME) or "Unite EV Charger"
+            return self.async_create_entry(title=title, data=user_input)
 
         schema = vol.Schema(
             {
@@ -205,34 +185,18 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
             }
         )
         data_schema = self.add_suggested_values_to_schema(schema, user_input or {})
-        return self.async_show_form(step_id="user", data_schema=data_schema, errors=errors)
+        return self.async_show_form(step_id="user", data_schema=data_schema)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Change the connection (IP / port / unit id) of an existing charger."""
-        errors: dict[str, str] = {}
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
 
         if user_input is not None:
-            client = WebastoModbus(
-                host=user_input[CONF_HOST],
-                port=user_input[CONF_PORT],
-                unit_id=user_input[CONF_UNIT_ID],
+            return self.async_update_reload_and_abort(
+                entry, data={**entry.data, **user_input}
             )
-            try:
-                await client.read_register(R.SERIAL_NUMBER)
-            except WebastoModbusError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                errors["base"] = "unknown"
-            finally:
-                await client.async_close()
-
-            if not errors:
-                return self.async_update_reload_and_abort(
-                    entry, data={**entry.data, **user_input}
-                )
 
         schema = vol.Schema(
             {
@@ -245,7 +209,6 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(schema, suggested),
-            errors=errors,
         )
 
     @staticmethod
@@ -312,24 +275,9 @@ class UniteOptionsFlow(OptionsFlow):
 
     async def async_step_connection(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Edit the connection (IP / port / unit id) from the settings menu."""
-        errors: dict[str, str] = {}
         if user_input is not None:
-            client = WebastoModbus(
-                host=user_input[CONF_HOST],
-                port=user_input[CONF_PORT],
-                unit_id=user_input[CONF_UNIT_ID],
-            )
-            try:
-                await client.read_register(R.SERIAL_NUMBER)
-            except WebastoModbusError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001 - never let the flow hang/crash
-                errors["base"] = "unknown"
-            finally:
-                await client.async_close()
-            if not errors:
-                self._data_updates.update(user_input)
-                return await self.async_step_init()
+            self._data_updates.update(user_input)
+            return await self.async_step_init()
         current = {**self._entry.data, **self._data_updates}
         schema = vol.Schema(
             {
@@ -341,7 +289,6 @@ class UniteOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="connection",
             data_schema=self.add_suggested_values_to_schema(schema, current),
-            errors=errors,
         )
 
     async def async_step_save(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

@@ -22,6 +22,20 @@ class FakeConfigEntries:
         self.events.append(("persist", dict(data)))
 
 
+class FakeStore:
+    def __init__(self, events: list[tuple], loaded: dict | None = None) -> None:
+        self.events = events
+        self.loaded = loaded
+
+    async def async_load(self) -> dict | None:
+        self.events.append(("load_journal",))
+        return self.loaded
+
+    async def async_save(self, data: dict) -> None:
+        self.loaded = dict(data)
+        self.events.append(("durable", dict(data)))
+
+
 class FakeClient:
     def __init__(self, values: dict[str, int], events: list[tuple]) -> None:
         self.values = dict(values)
@@ -90,6 +104,7 @@ def _coordinator(
         },
     )
     coordinator.client = FakeClient(values, events)
+    coordinator._ownership_store = FakeStore(events)
     coordinator.controller = FakeController()
     coordinator.failsafe_configured = None
     return coordinator, coordinator.client, events
@@ -111,9 +126,10 @@ def test_activation_persists_complete_snapshot_before_first_write():
         ("read", R.FAILSAFE_TIMEOUT_S.name, 45),
         ("read", R.PHASE_SWITCH.name, 0),
     ]
+    durable_index = next(i for i, event in enumerate(events) if event[0] == "durable")
     persist_index = next(i for i, event in enumerate(events) if event[0] == "persist")
     write_index = next(i for i, event in enumerate(events) if event[0] == "write")
-    assert persist_index < write_index
+    assert durable_index < persist_index < write_index
     assert coordinator.entry.data["ownership_dirty"] is True
     assert coordinator.entry.data["original_current_limit"] == 20
     assert coordinator.entry.data["original_failsafe_current"] == 12
@@ -193,6 +209,27 @@ def test_snapshot_read_failure_performs_no_writes():
     assert _state(coordinator) == "error"
 
 
+def test_startup_loads_durable_journal_before_deciding_ownership():
+    coordinator, _client, events = _coordinator(
+        data={"automatic_control": True, "ownership_dirty": False}
+    )
+    coordinator._ownership_store.loaded = {
+        "automatic_control": False,
+        "ownership_dirty": True,
+        "original_current_limit": 20,
+        "original_failsafe_current": 12,
+        "original_failsafe_timeout": 45,
+        "original_phase_switch": 0,
+    }
+
+    asyncio.run(coordinator.async_load_ownership_record())
+
+    assert events[0] == ("load_journal",)
+    assert coordinator.automatic_control_requested is False
+    assert coordinator.ownership_dirty is True
+    assert _state(coordinator) == "error"
+
+
 def test_initialization_write_failure_rolls_back_snapshot():
     coordinator, client, events = _coordinator()
     client.fail_write_once = R.FAILSAFE_TIMEOUT_S.name
@@ -217,6 +254,18 @@ def test_initialization_write_failure_rolls_back_snapshot():
         ("write", R.FAILSAFE_TIMEOUT_S.name, 45),
         ("write", R.PHASE_SWITCH.name, 0),
     ]
+    assert coordinator.entry.data["ownership_dirty"] is False
+    assert _state(coordinator) == "suspended"
+
+
+def test_failsafe_programming_is_required_without_dlb():
+    coordinator, client, _events = _coordinator()
+    coordinator.entry.options["dlb_enabled"] = False
+    client.fail_write_once = R.FAILSAFE_TIMEOUT_S.name
+
+    with pytest.raises(WebastoModbusError, match="cannot write"):
+        asyncio.run(coordinator.async_activate())
+
     assert coordinator.entry.data["ownership_dirty"] is False
     assert _state(coordinator) == "suspended"
 
@@ -274,6 +323,9 @@ def _integration_fakes(monkeypatch, *, requested: bool):
             self.entry = entry
             self.client = client
             self.controller = None
+
+        async def async_load_ownership_record(self) -> None:
+            events.append("load")
 
         @property
         def automatic_control_requested(self) -> bool:
@@ -344,7 +396,7 @@ def test_setup_with_control_off_never_claims_or_polls(monkeypatch):
 
     assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
 
-    assert events == ["controller", "platforms"]
+    assert events == ["load", "controller", "platforms"]
 
 
 def test_setup_with_control_on_activates_before_first_refresh(monkeypatch):
@@ -353,6 +405,7 @@ def test_setup_with_control_on_activates_before_first_refresh(monkeypatch):
     assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
 
     assert events == [
+        "load",
         "controller",
         "activate",
         "device_info",

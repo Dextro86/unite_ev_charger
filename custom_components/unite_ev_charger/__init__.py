@@ -68,6 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unit_id=entry.data.get(CONF_UNIT_ID, DEFAULT_UNIT_ID),
     )
     coordinator = WebastoCoordinator(hass, entry, client)
+    await coordinator.async_load_ownership_record()
     coordinator.controller = ChargeControl(hass, entry, coordinator)
 
     try:

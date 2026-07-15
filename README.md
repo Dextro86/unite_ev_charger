@@ -123,7 +123,7 @@ reading is missing, stale or invalid, the integration immediately applies the
 configured failsafe current and stops the Alive heartbeat. The wallbox watchdog
 therefore also falls back to its failsafe current if the meter remains unhealthy.
 Normal control resumes only after a complete fresh snapshot is available.
-Enabling DLB therefore also requires working failsafe registers `2000` and
+Every automatic-control strategy requires working failsafe registers `2000` and
 `2002`; setup/reconnect fails closed if the charger rejects that handshake.
 
 Choose **1 phase** only for a genuinely single-phase grid connection. A 3-phase
@@ -176,10 +176,11 @@ Fast, Manual, Solar and evcc are current-control strategies. DLB is a separate
 per-phase safety ceiling; turning DLB off does not release charger ownership.
 The **Automatic charger control** switch is the ownership boundary.
 
-When automatic control turns on, the integration first reads and persists
-registers `5004` (current limit), `2000` (failsafe current), `2002` (failsafe
-timeout), and `405` when phase control can change it. Only after that complete
-snapshot is durable does it configure EMS control and start the heartbeat.
+When automatic control turns on, the integration first reads registers `5004`
+(current limit), `2000` (failsafe current), `2002` (failsafe timeout), and `405`
+when phase control can change it. It saves them to an atomic Home Assistant
+ownership journal. Only after that complete snapshot is durable does it
+configure EMS control and start the heartbeat.
 
 When automatic control turns off, or the entry unloads, reloads, is removed, or
 Home Assistant shuts down, the integration keeps Alive running while it restores
