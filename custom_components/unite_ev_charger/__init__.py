@@ -71,6 +71,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = WebastoCoordinator(hass, entry, client)
     await coordinator.async_load_ownership_record()
     coordinator.controller = ChargeControl(hass, entry, coordinator)
+    listener_unsubs = []
+
+    async def _async_shutdown(_event) -> None:
+        restored = await coordinator.async_suspend(preserve_requested=True)
+        if not restored:
+            _LOGGER.critical(
+                "Home Assistant is stopping before charger configuration could "
+                "be restored; recovery snapshot retained"
+            )
 
     try:
         if coordinator.automatic_control_requested:
@@ -93,8 +102,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 severity=ir.IssueSeverity.WARNING,
                 translation_key=ISSUE_LEGACY_BASELINE_REQUIRED,
             )
+        listener_unsubs.append(entry.add_update_listener(_async_reload_on_update))
+        listener_unsubs.append(
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_shutdown)
+        )
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        for unsubscribe in listener_unsubs:
+            entry.async_on_unload(unsubscribe)
+        listener_unsubs.clear()
     except (Exception, asyncio.CancelledError) as err:
+        for unsubscribe in reversed(listener_unsubs):
+            try:
+                unsubscribe()
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning("Could not unregister failed setup listener", exc_info=True)
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         if coordinator.ownership_dirty:
             try:
@@ -115,19 +136,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise ConfigEntryNotReady(f"Could not reach the charger: {err}") from err
         raise
 
-    entry.async_on_unload(entry.add_update_listener(_async_reload_on_update))
-
-    async def _async_shutdown(_event) -> None:
-        restored = await coordinator.async_suspend(preserve_requested=True)
-        if not restored:
-            _LOGGER.critical(
-                "Home Assistant is stopping before charger configuration could "
-                "be restored; recovery snapshot retained"
-            )
-
-    entry.async_on_unload(
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_shutdown)
-    )
     return True
 
 

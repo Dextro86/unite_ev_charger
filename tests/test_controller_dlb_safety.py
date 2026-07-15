@@ -31,6 +31,9 @@ class FakeHass:
     def __init__(self) -> None:
         self.states = FakeStates()
 
+    def async_create_task(self, coro, name=None):
+        return asyncio.create_task(coro, name=name)
+
 
 class FakeClient:
     def __init__(self) -> None:
@@ -205,6 +208,34 @@ def test_invalid_dlb_input_stops_even_with_positive_communication_failsafe():
 
     asyncio.run(control.async_apply(_data(set_current=32)))
 
+    assert client.writes == [("set_current_a", 0)]
+    assert control.computed_setpoint == 0
+    assert control.heartbeat_allowed is False
+
+
+def test_stale_dlb_during_recovery_cancels_and_holds_zero():
+    control, hass, client = _control(
+        control_mode="internal",
+        phase_recovery_enabled=True,
+        phase_recovery_observe=30,
+    )
+    control._started_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    _set_grid(
+        hass,
+        (10, 10, 10),
+        datetime.now(timezone.utc) - timedelta(seconds=31),
+    )
+
+    async def run():
+        blocker = asyncio.Event()
+        control._recovery_task = asyncio.create_task(blocker.wait())
+        await control.async_apply(_data(set_current=16))
+        await asyncio.sleep(0)
+        cancelled = control._recovery_task.cancelled()
+        await control.async_shutdown()
+        return cancelled
+
+    assert asyncio.run(run()) is True
     assert client.writes == [("set_current_a", 0)]
     assert control.computed_setpoint == 0
     assert control.heartbeat_allowed is False

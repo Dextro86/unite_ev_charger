@@ -63,7 +63,7 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
 
 ## Installation
 
-HACS is optional. For this `0.2.0-dev.2` commissioning build, install the
+HACS is optional. For this `0.2.0-dev.3` commissioning build, install the
 `codex/dlb-safety-hardening` branch manually: download that branch, copy
 `custom_components/unite_ev_charger` into Home Assistant's
 `config/custom_components/` directory, and restart Home Assistant.
@@ -113,8 +113,10 @@ journal remains dirty so manual recovery evidence is not lost.
 1. *Settings → Devices & Services → Add Integration → Unite EV Charger*.
 2. Enter a name and the charger's IP address (port and unit id are pre-filled).
 
-That gets you monitoring and Fast/Manual control. Solar, DLB, evcc and the restart
-button are configured afterwards via **Configure**.
+Automatic charger control is off by default. Charger-backed entities and
+monitoring remain unavailable until **Automatic charger control** is enabled.
+Solar, DLB, evcc and the restart button are configured afterwards via
+**Configure**.
 
 Upgrading an existing entry from a version that did not save the original
 failsafe registers disables automatic control once and raises a Home Assistant
@@ -125,10 +127,11 @@ integration never assumes missing original values.
 ## Configuration (Configure → Settings)
 
 The options are a menu — edit a section, return, and **Save & close** once.
+Change charger IP, port, or unit id through the config entry's
+**Reconfigure** flow.
 
 | Screen | What you set |
 |---|---|
-| **Connection** | Charger IP, port, Modbus unit id |
 | **Charging** | Charging control (built-in / external evcc), default mode, min/max current, enable phase switching, optional 1→3 phase recovery |
 | **Power meter** | How you measure grid/solar power — HomeWizard P1 (signed), DSMR (import+export), a ready-made surplus sensor, or none. Shared by Solar and DLB. |
 | **Dynamic Load Balancing** | Enable, grid phase count, main fuse (A), safety margin, maximum sensor age, and one grid-current sensor per phase |
@@ -152,8 +155,9 @@ same approach evcc uses.
 DLB is fail-closed. Every configured grid phase must have a finite, plausible,
 fresh current reading received after this integration started. If any required
 reading is missing, stale or invalid, the integration immediately applies the
-configured failsafe current and stops the Alive heartbeat. The wallbox watchdog
-therefore also falls back to its failsafe current if the meter remains unhealthy.
+safe live setpoint `0 A` and withholds the Alive heartbeat. The configured
+communication failsafe remains programmed in the wallbox, but invalid DLB input
+never commands that potentially positive value as the live current limit.
 Normal control resumes only after a complete fresh snapshot is available.
 Every automatic-control strategy requires working failsafe registers `2000` and
 `2002`; setup/reconnect fails closed if the charger rejects that handshake.
@@ -219,6 +223,10 @@ Home Assistant shuts down, the integration keeps Alive running while it restores
 those values in order, reads them back, then stops Alive and closes Modbus.
 Failed restoration retains the snapshot, reports an error, and retries; it is
 never reported as a successful release.
+
+If entry deletion cannot restore a dirty ownership journal, its orphaned Home
+Assistant Store file is retained as manual recovery evidence. Re-adding the
+charger creates a different entry id and does not find or consume that orphan.
 
 The remaining connection contract is:
 

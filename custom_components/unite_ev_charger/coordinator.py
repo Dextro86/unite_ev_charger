@@ -23,6 +23,7 @@ from .const import (
     CONF_AUTOMATIC_CONTROL,
     CONF_BASELINE_REQUIRED,
     CONF_CONTROL_MODE,
+    CONF_DLB_ENABLED,
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
     CONF_HOST,
@@ -382,7 +383,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                         original.phase_switch,
                     )
                 await self._async_claim_connection_locked()
-            except WebastoModbusError:
+            except (Exception, asyncio.CancelledError):
                 if self.ownership_dirty:
                     try:
                         restored = await self._async_restore_locked(
@@ -445,6 +446,24 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
 
         original = self.original_configuration
         if original is None:
+            if self.ownership_dirty:
+                self._set_ownership_state(
+                    OwnershipState.ERROR, "dirty ownership journal is incomplete"
+                )
+                if getattr(self.client, "connected", False):
+                    try:
+                        await self.client.async_close()
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.critical(
+                            "Modbus connection could not be closed while retaining "
+                            "an incomplete dirty ownership journal",
+                            exc_info=True,
+                        )
+                _LOGGER.critical(
+                    "Dirty EMS ownership journal is incomplete; retaining manual "
+                    "recovery evidence and refusing to suspend"
+                )
+                return False
             if getattr(self.client, "connected", False):
                 await self.client.async_close()
             self._set_ownership_state(OwnershipState.SUSPENDED, "no active lease")
@@ -540,8 +559,8 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             if not self.ownership_active:
                 raise UpdateFailed("Automatic charger control is not active")
         try:
-            # Claim a new connection before telemetry. This puts the charger at
-            # the configured failsafe current before normal control can resume.
+            # Claim a new connection before telemetry. DLB and external control
+            # remain at 0 A until this cycle proves safe intent.
             if not self.client.connected:
                 await self.async_claim_connection()
 
@@ -645,11 +664,18 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             failsafe_current_a=failsafe_current,
             failsafe_timeout_s=failsafe_timeout,
         )
-        await self.client.write_register(R.SET_CURRENT_A, failsafe_current)
+        safe_initial_current = (
+            0
+            if self.entry.options.get(CONF_DLB_ENABLED, False)
+            or self.entry.options.get(CONF_CONTROL_MODE) == CONTROL_EXTERNAL
+            else failsafe_current
+        )
+        await self.client.write_register(R.SET_CURRENT_A, safe_initial_current)
+        await write_heartbeat(self.client)
         _LOGGER.info(
             "Claimed charger control: live limit=%s A, failsafe=%s A after %s s "
             "(registers configured=%s)",
-            failsafe_current,
+            safe_initial_current,
             failsafe_current,
             failsafe_timeout,
             self.failsafe_configured,

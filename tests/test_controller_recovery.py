@@ -27,6 +27,16 @@ class FakeClient:
         self.writes.append((reg.name, value))
 
 
+class FakeHass:
+    def __init__(self) -> None:
+        self.created_tasks: list[tuple[asyncio.Task, str | None]] = []
+
+    def async_create_task(self, coro, name=None):
+        task = asyncio.create_task(coro, name=name)
+        self.created_tasks.append((task, name))
+        return task
+
+
 class FakeCoordinator:
     def __init__(self, client: FakeClient) -> None:
         self.client = client
@@ -60,7 +70,8 @@ def _control(**overrides):
     opts.update(overrides)
     client = FakeClient()
     coord = FakeCoordinator(client)
-    ctl = ChargeControl(object(), SimpleNamespace(options=opts), coord)
+    hass = FakeHass()
+    ctl = ChargeControl(hass, SimpleNamespace(options=opts), coord)
     return ctl, client, coord
 
 
@@ -129,6 +140,61 @@ def test_phase3_while_charging_1p_starts_recovery():
     assert writes == [("phase_switch", 1)]  # live 405=3 written immediately
     assert active is True
     assert status == "observing_3p"
+
+
+def test_recovery_uses_home_assistant_tracked_task_creation():
+    ctl, _client, coord = _control(
+        phase_recovery_observe=30, phase_recovery_dwell=30
+    )
+    coord.data = _charging_1p()
+
+    async def run():
+        await ctl.async_external_set_phase(3)
+        await asyncio.sleep(0)
+        created = list(ctl.hass.created_tasks)
+        await ctl.async_shutdown()
+        return created
+
+    created = asyncio.run(run())
+    assert len(created) == 1
+    assert created[0][0] is not None
+    assert created[0][1] == "unite_ev_charger phase recovery"
+
+
+def test_suspension_cancels_recovery_without_refresh_lock_reentry():
+    ctl, client, coord = _control(
+        phase_recovery_observe=30, phase_recovery_dwell=30
+    )
+    coord.data = _charging_1p()
+    coord._lock = asyncio.Lock()
+    coord.refreshes = 0
+
+    async def write_owned(register, value):
+        async with coord._lock:
+            if not coord.ownership_active:
+                raise WebastoModbusError("EMS ownership is not active")
+            await client.write_register(register, value)
+
+    async def immediate_refresh():
+        coord.refreshes += 1
+        await write_owned(controller_module.R.SET_CURRENT_A, 16)
+
+    async def suspend():
+        async with coord._lock:
+            coord.ownership_active = False
+            await ctl.async_shutdown()
+
+    coord.async_write_owned = write_owned
+    coord.async_request_refresh = immediate_refresh
+
+    async def run():
+        ctl._start_recovery()
+        await asyncio.sleep(0)
+        await asyncio.wait_for(suspend(), timeout=0.25)
+
+    asyncio.run(run())
+    assert coord.refreshes == 0
+    assert client.writes == []
 
 
 def test_buffering_holds_positive_current_but_lets_zero_through():

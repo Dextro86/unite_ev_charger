@@ -11,6 +11,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 import uec.coordinator as coordinator_module
 from uec import registers as R
 from uec import integration
+from uec.controller import ChargeControl
 from uec.coordinator import OriginalChargerConfig, OwnershipState, WebastoCoordinator
 from uec.modbus import WebastoModbusError
 
@@ -54,6 +55,8 @@ class FakeClient:
         self.slow_operations = False
         self.write_started = asyncio.Event()
         self.allow_write = asyncio.Event()
+        self.on_write = None
+        self.fail_close = False
 
     async def read_register(self, register) -> int:
         if self.slow_operations:
@@ -70,6 +73,8 @@ class FakeClient:
             await asyncio.sleep(0)
         name = register.name
         self.events.append(("write", name, value))
+        if self.on_write is not None:
+            self.on_write(name, value)
         if name == R.SET_CURRENT_A.name and self.pause_next_setpoint:
             self.pause_next_setpoint = False
             self.write_started.set()
@@ -83,6 +88,8 @@ class FakeClient:
 
     async def async_close(self) -> None:
         self.events.append(("close",))
+        if self.fail_close:
+            raise RuntimeError("cannot close")
         self.connected = False
 
     def take_new_connection(self) -> bool:
@@ -133,7 +140,7 @@ def _state(coordinator: WebastoCoordinator) -> str:
     return state.value if hasattr(state, "value") else str(state)
 
 
-def integration_config_flow():
+def integration_config_flow(monkeypatch):
     """Load the real config flow against the smallest HA test double."""
     import importlib
     import sys
@@ -165,14 +172,31 @@ def integration_config_flow():
             self.hass.config_entries.reloads.append(entry.entry_id)
             return {"type": "abort", "reason": "reconfigure_successful"}
 
-    config_entries.ConfigFlow = ConfigFlow
-    config_entries.ConfigFlowResult = dict
-    config_entries.OptionsFlow = object
-    sys.modules["homeassistant.const"].CONF_NAME = "name"
-    sys.modules["homeassistant.core"].callback = lambda function: function
+    class OptionsFlow:
+        def async_create_entry(self, *, title, data):
+            return {"title": title, "data": data}
+
+        def async_show_menu(self, *, step_id, menu_options):
+            return {"step_id": step_id, "menu_options": menu_options}
+
+        def add_suggested_values_to_schema(self, schema, _suggested):
+            return schema
+
+    monkeypatch.setattr(config_entries, "ConfigFlow", ConfigFlow, raising=False)
+    monkeypatch.setattr(config_entries, "ConfigFlowResult", dict, raising=False)
+    monkeypatch.setattr(config_entries, "OptionsFlow", OptionsFlow, raising=False)
+    monkeypatch.setattr(
+        sys.modules["homeassistant.const"], "CONF_NAME", "name", raising=False
+    )
+    monkeypatch.setattr(
+        sys.modules["homeassistant.core"],
+        "callback",
+        lambda function: function,
+        raising=False,
+    )
 
     voluptuous = types.ModuleType("voluptuous")
-    sys.modules.setdefault("voluptuous", voluptuous)
+    monkeypatch.setitem(sys.modules, "voluptuous", voluptuous)
 
     selector = types.ModuleType("homeassistant.helpers.selector")
 
@@ -182,15 +206,21 @@ def integration_config_flow():
 
     selector.EntitySelector = Selector
     selector.EntitySelectorConfig = Selector
-    sys.modules["homeassistant.helpers.selector"] = selector
-    sys.modules["homeassistant.helpers"].selector = selector
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.selector", selector)
+    monkeypatch.setattr(
+        sys.modules["homeassistant.helpers"], "selector", selector, raising=False
+    )
 
     aiohttp_client = types.ModuleType("homeassistant.helpers.aiohttp_client")
     aiohttp_client.async_get_clientsession = lambda _hass: None
-    sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.helpers.aiohttp_client", aiohttp_client
+    )
 
+    monkeypatch.delitem(sys.modules, "uec.config_flow", raising=False)
+    monkeypatch.delattr(sys.modules["uec"], "config_flow", raising=False)
     module = importlib.import_module("uec.config_flow")
-    return module.UniteConfigFlow()
+    return module
 
 
 def test_missing_automatic_control_key_defaults_off():
@@ -199,7 +229,7 @@ def test_missing_automatic_control_key_defaults_off():
 
 
 def test_new_entry_persists_automatic_control_off(monkeypatch):
-    flow = integration_config_flow()
+    flow = integration_config_flow(monkeypatch).UniteConfigFlow()
     result = asyncio.run(
         flow.async_step_user(
             {
@@ -233,6 +263,36 @@ def test_activation_persists_complete_snapshot_before_first_write():
     assert coordinator.entry.data["original_failsafe_current"] == 12
     assert coordinator.entry.data["original_failsafe_timeout"] == 45
     assert coordinator.entry.data["original_phase_switch"] == 0
+    assert _state(coordinator) == "active"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"dlb_enabled": True, "failsafe_current": 32},
+        {"dlb_enabled": False, "control_mode": "external", "failsafe_current": 32},
+    ],
+)
+def test_initial_claim_starts_dlb_and_external_control_at_zero(options):
+    coordinator, _client, events = _coordinator()
+    coordinator.entry.options.update(options)
+    states_at_alive: list[str] = []
+    coordinator.client.on_write = lambda name, _value: (
+        states_at_alive.append(_state(coordinator))
+        if name == R.ALIVE.name
+        else None
+    )
+
+    asyncio.run(coordinator.async_activate())
+
+    writes = [event for event in events if event[0] == "write"]
+    assert writes[:4] == [
+        ("write", R.FAILSAFE_CURRENT_A.name, 32),
+        ("write", R.FAILSAFE_TIMEOUT_S.name, 30),
+        ("write", R.SET_CURRENT_A.name, 0),
+        ("write", R.ALIVE.name, 1),
+    ]
+    assert states_at_alive == ["initializing"]
     assert _state(coordinator) == "active"
 
 
@@ -505,6 +565,56 @@ def test_initialization_write_failure_rolls_back_snapshot():
     assert _state(coordinator) == "suspended"
 
 
+def test_alive_failure_rolls_back_before_activation_can_become_active():
+    coordinator, client, _events = _coordinator()
+    client.fail_write_once = R.ALIVE.name
+
+    with pytest.raises(WebastoModbusError, match="cannot write alive"):
+        asyncio.run(coordinator.async_activate())
+
+    assert coordinator.entry.data["ownership_dirty"] is False
+    assert _state(coordinator) == "suspended"
+
+
+def test_generic_reconnect_callback_failure_rolls_back_originals():
+    coordinator, _client, _events = _coordinator()
+
+    class BrokenCallback(FakeController):
+        async def async_on_reconnect(self, _phase_raw: int | None) -> None:
+            raise RuntimeError("callback exploded")
+
+    coordinator.controller = BrokenCallback()
+
+    with pytest.raises(RuntimeError, match="callback exploded"):
+        asyncio.run(coordinator.async_activate())
+
+    assert coordinator.entry.data["ownership_dirty"] is False
+    assert _state(coordinator) == "suspended"
+
+
+def test_cancellation_during_claim_rolls_back_before_propagating():
+    async def exercise() -> WebastoCoordinator:
+        coordinator, _client, _events = _coordinator()
+        callback_started = asyncio.Event()
+
+        class BlockingCallback(FakeController):
+            async def async_on_reconnect(self, _phase_raw: int | None) -> None:
+                callback_started.set()
+                await asyncio.Event().wait()
+
+        coordinator.controller = BlockingCallback()
+        activation = asyncio.create_task(coordinator.async_activate())
+        await callback_started.wait()
+        activation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await activation
+        return coordinator
+
+    coordinator = asyncio.run(exercise())
+    assert coordinator.entry.data["ownership_dirty"] is False
+    assert _state(coordinator) == "suspended"
+
+
 @pytest.mark.parametrize("rollback_failure", ["exception", "cancellation"])
 def test_activation_failure_preserves_original_when_rollback_fails(
     caplog, rollback_failure
@@ -588,6 +698,46 @@ def test_restore_failure_keeps_dirty_snapshot_and_retry_completes():
     assert _state(coordinator) == "suspended"
 
 
+def test_incomplete_dirty_journal_stays_error_and_is_never_cleared(caplog):
+    coordinator, client, events = _coordinator(
+        data={
+            "automatic_control": False,
+            "ownership_dirty": True,
+            "original_current_limit": 20,
+        }
+    )
+
+    with caplog.at_level(logging.CRITICAL, logger="uec.coordinator"):
+        restored = asyncio.run(
+            coordinator.async_suspend(preserve_requested=True)
+        )
+
+    assert restored is False
+    assert coordinator.entry.data["ownership_dirty"] is True
+    assert coordinator.entry.data["original_current_limit"] == 20
+    assert not any(event[0] in {"durable", "persist"} for event in events)
+    assert client.connected is False
+    assert _state(coordinator) == "error"
+    assert "incomplete" in caplog.text
+
+
+def test_incomplete_dirty_journal_close_failure_still_returns_false(caplog):
+    coordinator, client, _events = _coordinator(
+        data={"ownership_dirty": True, "original_current_limit": 20}
+    )
+    client.fail_close = True
+
+    with caplog.at_level(logging.CRITICAL, logger="uec.coordinator"):
+        restored = asyncio.run(
+            coordinator.async_suspend(preserve_requested=True)
+        )
+
+    assert restored is False
+    assert coordinator.entry.data["ownership_dirty"] is True
+    assert _state(coordinator) == "error"
+    assert "could not be closed" in caplog.text
+
+
 def test_clean_ownership_record_can_be_removed():
     coordinator, _client, events = _coordinator(
         data={"automatic_control": False, "ownership_dirty": False}
@@ -626,7 +776,7 @@ def test_claim_logs_effective_safety_values(caplog):
         asyncio.run(exercise())
 
     assert (
-        "Claimed charger control: live limit=6 A, failsafe=6 A after 30 s"
+        "Claimed charger control: live limit=0 A, failsafe=6 A after 30 s"
         in caplog.text
     )
 
@@ -831,6 +981,28 @@ def test_setup_cancellation_restores_before_propagating(monkeypatch):
     assert entry.data["ownership_dirty"] is False
 
 
+@pytest.mark.parametrize("listener", ["update", "stop"])
+def test_listener_registration_failure_restores_before_propagating(
+    monkeypatch, listener
+):
+    hass, entry, events, bus = _integration_fakes(monkeypatch, requested=True)
+    if listener == "update":
+        entry.add_update_listener = lambda _callback: (_ for _ in ()).throw(
+            RuntimeError("update listener")
+        )
+    else:
+        bus.async_listen_once = lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("stop listener")
+        )
+
+    with pytest.raises(RuntimeError, match=f"{listener} listener"):
+        asyncio.run(integration.async_setup_entry(hass, entry))
+
+    assert events[-1] == "suspend:True"
+    assert entry.data["ownership_dirty"] is False
+    assert entry.entry_id not in hass.data.get("unite_ev_charger", {})
+
+
 @pytest.mark.parametrize("restore_error", [False, True])
 def test_setup_failure_retains_dirty_journal_when_rollback_fails(
     monkeypatch, caplog, restore_error
@@ -949,8 +1121,8 @@ def test_remove_orphan_dirty_journal_retains_manual_recovery_evidence(
     assert "journal retained" in caplog.text
 
 
-def test_reconfigure_updates_once_and_listener_performs_only_reload():
-    flow = integration_config_flow()
+def test_reconfigure_updates_once_and_listener_performs_only_reload(monkeypatch):
+    flow = integration_config_flow(monkeypatch).UniteConfigFlow()
     updates: list[dict] = []
     reloads: list[str] = []
     entry = SimpleNamespace(
@@ -992,6 +1164,44 @@ def test_reconfigure_updates_once_and_listener_performs_only_reload():
     assert reloads == []
     asyncio.run(integration._async_reload_on_update(hass, entry))
     assert reloads == [entry.entry_id]
+
+
+def test_options_save_has_one_reload_and_one_suspension_path(monkeypatch):
+    module = integration_config_flow(monkeypatch)
+    entry = SimpleNamespace(
+        entry_id="entry",
+        data={"host": "charger", "port": 502, "unit_id": 255},
+        options={"max_current": 16},
+    )
+    updates: list[dict] = []
+    reloads: list[str] = []
+    suspensions: list[str] = []
+
+    class ConfigEntries:
+        def async_update_entry(self, _entry, *, data) -> None:
+            updates.append(dict(data))
+
+        async def async_reload(self, entry_id) -> None:
+            reloads.append(entry_id)
+            suspensions.append(entry_id)
+
+    coordinator = SimpleNamespace(configuration_changed=lambda _entry: True)
+    hass = SimpleNamespace(
+        config_entries=ConfigEntries(),
+        data={"unite_ev_charger": {entry.entry_id: coordinator}},
+    )
+    flow = module.UniteOptionsFlow(entry)
+    flow.hass = hass
+
+    menu = asyncio.run(flow.async_step_init())
+    result = asyncio.run(flow.async_step_save())
+    entry.options = result["data"]
+    asyncio.run(integration._async_reload_on_update(hass, entry))
+
+    assert "connection" not in menu["menu_options"]
+    assert updates == []
+    assert reloads == [entry.entry_id]
+    assert suspensions == [entry.entry_id]
 
 
 def test_shutdown_listener_suspends_with_requested_state_preserved(monkeypatch):

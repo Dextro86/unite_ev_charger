@@ -233,14 +233,11 @@ class UniteOptionsFlow(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._entry = config_entry
         self.options: dict[str, Any] = dict(config_entry.options)
-        # Connection edits (host/port/unit) live in entry.data, not options, so
-        # they are staged here and applied once on save.
-        self._data_updates: dict[str, Any] = {}
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
-            menu_options=["connection", "charge", "meter", "dlb", "solar", "advanced", "reboot", "save"],
+            menu_options=["charge", "meter", "dlb", "solar", "advanced", "reboot", "save"],
         )
 
     async def async_step_reboot(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -278,29 +275,7 @@ class UniteOptionsFlow(OptionsFlow):
             errors=errors,
         )
 
-    async def async_step_connection(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Edit the connection (IP / port / unit id) from the settings menu."""
-        if user_input is not None:
-            self._data_updates.update(user_input)
-            return await self.async_step_init()
-        current = {**self._entry.data, **self._data_updates}
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_HOST): str,
-                vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
-                vol.Required(CONF_UNIT_ID, default=DEFAULT_UNIT_ID): int,
-            }
-        )
-        return self.async_show_form(
-            step_id="connection",
-            data_schema=self.add_suggested_values_to_schema(schema, current),
-        )
-
     async def async_step_save(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if self._data_updates:
-            self.hass.config_entries.async_update_entry(
-                self._entry, data={**self._entry.data, **self._data_updates}
-            )
         return self.async_create_entry(title="", data=self.options)
 
     def _energy_error(self, *entity_ids: str | None) -> bool:

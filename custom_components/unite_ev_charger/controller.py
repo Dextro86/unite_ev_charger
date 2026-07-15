@@ -217,6 +217,7 @@ class ChargeControl:
         self._recovery_status: str = RECOVERY_IDLE
         self._recovery_remaining_s: int = 0
         self._recovery_attempted: bool = False   # latch: one escalation per 3P request
+        self._recovery_abort_requested: bool = False
         self._buffer_commands: bool = False       # hold evcc's writes during the pause
         self._last_recovery_at: datetime | None = None
         self._last_recovery_result: str | None = None
@@ -358,11 +359,16 @@ class ChargeControl:
     def _start_recovery(self) -> None:
         if self.recovery_active:
             return
-        self._recovery_task = asyncio.create_task(self._recovery_sequence())
+        self._recovery_abort_requested = False
+        self._recovery_task = self.hass.async_create_task(
+            self._recovery_sequence(), name="unite_ev_charger phase recovery"
+        )
 
     def _cancel_recovery(self) -> None:
+        self._recovery_abort_requested = True
         if self._recovery_task is not None and not self._recovery_task.done():
-            self._recovery_task.cancel()
+            if self._recovery_task is not asyncio.current_task():
+                self._recovery_task.cancel()
         self._buffer_commands = False
 
     def _set_recovery(self, status: str, remaining_s: int = 0) -> None:
@@ -467,13 +473,24 @@ class ChargeControl:
             self._buffer_commands = False
             self._recovery_remaining_s = 0
             self.coordinator.async_update_listeners()
-            await self.coordinator.async_request_refresh()
+            task = asyncio.current_task()
+            cancellation_in_progress = (
+                self._recovery_abort_requested
+                or (task is not None and task.cancelling())
+            )
+            if (
+                not cancellation_in_progress
+                and getattr(self.coordinator, "ownership_active", True)
+            ):
+                await self.coordinator.async_request_refresh()
 
     async def _observe_phase(self, observe_s: int) -> str | None:
         """Return a terminal status if we should stop, or None to escalate."""
         deadline = monotonic() + observe_s
         while True:
             self._set_recovery(RECOVERY_OBSERVING, int(ceil(deadline - monotonic())))
+            if self._recovery_abort_requested:
+                return RECOVERY_ABORTED
             data = self.coordinator.data
             if data is None or not data.vehicle_connected:
                 return RECOVERY_ABORTED
@@ -483,6 +500,8 @@ class ChargeControl:
                 break
             await asyncio.sleep(2)
             await self.coordinator.async_request_refresh()
+            if self._recovery_abort_requested:
+                return RECOVERY_ABORTED
         data = self.coordinator.data
         if data is None or not data.vehicle_connected:
             return RECOVERY_ABORTED
@@ -498,6 +517,8 @@ class ChargeControl:
         while monotonic() < deadline:
             self._set_recovery(RECOVERY_DWELLING, int(ceil(deadline - monotonic())))
             await asyncio.sleep(1)
+            if self._recovery_abort_requested:
+                return False
             data = self.coordinator.data
             if data is not None and not data.vehicle_connected:
                 return False
@@ -537,9 +558,19 @@ class ChargeControl:
         # the coordinator, so the wallbox does not drop to its failsafe.
         if self.is_external:
             return
+
+        dlb_cap = None
+        if self.cfg.dlb_enabled:
+            dlb_cap, dlb_error = self._dlb_cap(data)
+            if dlb_error is not None:
+                self._cancel_recovery()
+                await self._apply_dlb_failsafe(data, dlb_error)
+                return
+            self._set_dlb_health(True, None)
+            self._heartbeat_allowed = True
+
         # A recovery owns the charger while it runs; keep the control loop out.
         if self.recovery_active:
-            self._heartbeat_allowed = self.dlb_healthy is True
             return
 
         # Reset-on-disconnect: revert to the default mode when the car is
@@ -569,12 +600,8 @@ class ChargeControl:
             voltage=voltage,
             limits=limits,
         )
-        dlb_cap, dlb_error = self._dlb_cap(data)
-        if dlb_error is not None:
-            await self._apply_dlb_failsafe(data, dlb_error)
-            return
-
-        self._set_dlb_health(True if self.cfg.dlb_enabled else None, None)
+        if not self.cfg.dlb_enabled:
+            self._set_dlb_health(None, None)
         self._heartbeat_allowed = True
 
         # Solar anti-short-cycle may hold its minimum through a cloud transient,
