@@ -115,6 +115,75 @@ def _state(coordinator: WebastoCoordinator) -> str:
     return state.value if hasattr(state, "value") else str(state)
 
 
+def integration_config_flow():
+    """Load the real config flow against the smallest HA test double."""
+    import importlib
+    import sys
+    import types
+
+    config_entries = sys.modules["homeassistant.config_entries"]
+
+    class ConfigFlow:
+        def __init_subclass__(cls, **_kwargs) -> None:
+            return None
+
+        async def async_set_unique_id(self, _unique_id) -> None:
+            return None
+
+        def _abort_if_unique_id_configured(self) -> None:
+            return None
+
+        def async_create_entry(self, *, title, data):
+            return {"title": title, "data": data}
+
+    config_entries.ConfigFlow = ConfigFlow
+    config_entries.ConfigFlowResult = dict
+    config_entries.OptionsFlow = object
+    sys.modules["homeassistant.const"].CONF_NAME = "name"
+    sys.modules["homeassistant.core"].callback = lambda function: function
+
+    voluptuous = types.ModuleType("voluptuous")
+    sys.modules.setdefault("voluptuous", voluptuous)
+
+    selector = types.ModuleType("homeassistant.helpers.selector")
+
+    class Selector:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    selector.EntitySelector = Selector
+    selector.EntitySelectorConfig = Selector
+    sys.modules["homeassistant.helpers.selector"] = selector
+    sys.modules["homeassistant.helpers"].selector = selector
+
+    aiohttp_client = types.ModuleType("homeassistant.helpers.aiohttp_client")
+    aiohttp_client.async_get_clientsession = lambda _hass: None
+    sys.modules["homeassistant.helpers.aiohttp_client"] = aiohttp_client
+
+    module = importlib.import_module("uec.config_flow")
+    return module.UniteConfigFlow()
+
+
+def test_missing_automatic_control_key_defaults_off():
+    coordinator, _client, _events = _coordinator(data={})
+    assert coordinator.automatic_control_requested is False
+
+
+def test_new_entry_persists_automatic_control_off(monkeypatch):
+    flow = integration_config_flow()
+    result = asyncio.run(
+        flow.async_step_user(
+            {
+                "name": "Unite",
+                "host": "charger",
+                "port": 502,
+                "unit_id": 255,
+            }
+        )
+    )
+    assert result["data"]["automatic_control"] is False
+
+
 def test_activation_persists_complete_snapshot_before_first_write():
     coordinator, _client, events = _coordinator()
 

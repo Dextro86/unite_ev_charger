@@ -23,6 +23,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CHARGE_MODES,
+    CONF_AUTOMATIC_CONTROL,
     CONF_CONTROL_MODE,
     CONF_DEFAULT_MODE,
     CONF_DLB_CURRENT_L1,
@@ -174,7 +175,10 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(unique)
             self._abort_if_unique_id_configured()
             title = user_input.get(CONF_NAME) or "Unite EV Charger"
-            return self.async_create_entry(title=title, data=user_input)
+            return self.async_create_entry(
+                title=title,
+                data={**user_input, CONF_AUTOMATIC_CONTROL: False},
+            )
 
         schema = vol.Schema(
             {

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to your Unite charger",
-        "description": "Enter the charger's IP address. Modbus TCP must be enabled on the charger.",
+        "description": "Enter the charger's IP address. Modbus TCP must be enabled on the charger. The charger remains in autonomous mode after setup. Before first enabling Automatic charger control, restore the desired autonomous charger configuration and unplug the vehicle. The first enable claims EMS control.",
         "data": {
           "name": "Name",
           "host": "IP address",

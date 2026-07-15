@@ -178,7 +178,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
 
     @property
     def automatic_control_requested(self) -> bool:
-        return bool(self.entry.data.get(CONF_AUTOMATIC_CONTROL, True))
+        return bool(self.entry.data.get(CONF_AUTOMATIC_CONTROL, False))
 
     @property
     def ownership_dirty(self) -> bool:
@@ -224,7 +224,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
     @staticmethod
     def _ownership_record(data: dict) -> dict[str, object]:
         record: dict[str, object] = {
-            CONF_AUTOMATIC_CONTROL: bool(data.get(CONF_AUTOMATIC_CONTROL, True)),
+            CONF_AUTOMATIC_CONTROL: bool(data.get(CONF_AUTOMATIC_CONTROL, False)),
             CONF_OWNERSHIP_DIRTY: bool(data.get(CONF_OWNERSHIP_DIRTY, False)),
         }
         if record[CONF_OWNERSHIP_DIRTY]:

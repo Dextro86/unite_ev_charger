@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Verbind met je Unite-lader",
-        "description": "Voer het IP-adres van de lader in. Modbus TCP moet op de lader ingeschakeld zijn.",
+        "description": "Voer het IP-adres van de lader in. Modbus TCP moet op de lader ingeschakeld zijn. Na de configuratie blijft de lader autonoom werken. Herstel de gewenste autonome laderconfiguratie en koppel het voertuig los voordat je Automatische laderregeling voor het eerst inschakelt. De eerste inschakeling draagt de EMS-regeling over aan de integratie.",
         "data": {
           "name": "Naam",
           "host": "IP-adres",
