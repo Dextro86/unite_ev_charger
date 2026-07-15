@@ -21,6 +21,7 @@ CONF_ORIGINAL_FAILSAFE_CURRENT: Final = "original_failsafe_current"
 CONF_ORIGINAL_FAILSAFE_TIMEOUT: Final = "original_failsafe_timeout"
 CONF_ORIGINAL_PHASE_SWITCH: Final = "original_phase_switch"
 CONF_BASELINE_REQUIRED: Final = "baseline_required"
+ISSUE_LEGACY_BASELINE_REQUIRED: Final = "legacy_baseline_required"
 
 DEFAULT_PORT: Final = 502
 # Vestel/Webasto firmware answers on Modbus unit id 255.

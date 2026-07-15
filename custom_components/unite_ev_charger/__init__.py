@@ -7,14 +7,23 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 
 from .const import (
+    CONF_AUTOMATIC_CONTROL,
+    CONF_BASELINE_REQUIRED,
     CONF_HOST,
+    CONF_ORIGINAL_CURRENT_LIMIT,
+    CONF_ORIGINAL_FAILSAFE_CURRENT,
+    CONF_ORIGINAL_FAILSAFE_TIMEOUT,
+    CONF_ORIGINAL_PHASE_SWITCH,
+    CONF_OWNERSHIP_DIRTY,
     CONF_PORT,
     CONF_UNIT_ID,
     DEFAULT_PORT,
     DEFAULT_UNIT_ID,
     DOMAIN,
+    ISSUE_LEGACY_BASELINE_REQUIRED,
     PLATFORMS,
 )
 from .controller import ChargeControl
@@ -22,6 +31,33 @@ from .coordinator import WebastoCoordinator
 from .modbus import WebastoModbus, WebastoModbusError
 
 _LOGGER = logging.getLogger(__name__)
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Prevent legacy EMS values from being mistaken for proven originals."""
+    if entry.version >= 2:
+        return True
+
+    data = dict(entry.data)
+    for key in (
+        CONF_ORIGINAL_CURRENT_LIMIT,
+        CONF_ORIGINAL_FAILSAFE_CURRENT,
+        CONF_ORIGINAL_FAILSAFE_TIMEOUT,
+        CONF_ORIGINAL_PHASE_SWITCH,
+    ):
+        data.pop(key, None)
+    data.update(
+        {
+            CONF_AUTOMATIC_CONTROL: False,
+            CONF_OWNERSHIP_DIRTY: False,
+            CONF_BASELINE_REQUIRED: True,
+        }
+    )
+    hass.config_entries.async_update_entry(entry, data=data, version=2)
+    _LOGGER.warning(
+        "Legacy entry migrated with automatic control disabled: original "
+        "failsafe registers were never captured and must not be guessed"
+    )
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -49,6 +85,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(f"Could not reach the charger: {err}") from err
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    if entry.data.get(CONF_BASELINE_REQUIRED):
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            f"{ISSUE_LEGACY_BASELINE_REQUIRED}_{entry.entry_id}",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_LEGACY_BASELINE_REQUIRED,
+        )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_on_update))
 

@@ -6,9 +6,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, ISSUE_LEGACY_BASELINE_REQUIRED
 from .coordinator import WebastoCoordinator
 from .entity import UniteEntity
 
@@ -45,6 +46,11 @@ class UniteAutomaticControlSwitch(UniteEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs) -> None:
         await self.coordinator.async_activate()
+        ir.async_delete_issue(
+            self.coordinator.hass,
+            DOMAIN,
+            f"{ISSUE_LEGACY_BASELINE_REQUIRED}_{self.coordinator.entry.entry_id}",
+        )
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:

@@ -29,6 +29,12 @@
       "already_configured": "This charger is already configured."
     }
   },
+  "issues": {
+    "legacy_baseline_required": {
+      "title": "Confirm charger baseline before automatic control",
+      "description": "An earlier integration version changed the charger's failsafe registers without recording their original values. Automatic control is disabled because those values cannot be guessed safely. Return the charger to a known autonomous configuration, then turn on Automatic charger control. The integration will capture registers 5004, 2000, 2002 and 405 before writing anything."
+    }
+  },
   "entity": {
     "sensor": {
       "charge_point_state": {
@@ -88,7 +94,8 @@
       "connection": { "name": "Connection" }
     },
     "switch": {
-      "charging": { "name": "Charging" }
+      "charging": { "name": "Charging" },
+      "automatic_control": { "name": "Automatic charger control" }
     },
     "select": {
       "mode": {

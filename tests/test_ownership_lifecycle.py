@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -237,6 +238,18 @@ def test_restore_failure_keeps_dirty_snapshot_and_retry_completes():
     assert _state(coordinator) == "suspended"
 
 
+def test_claim_logs_effective_safety_values(caplog):
+    coordinator, _client, _events = _coordinator()
+
+    with caplog.at_level(logging.INFO, logger="uec.coordinator"):
+        asyncio.run(coordinator.async_claim_connection())
+
+    assert (
+        "Claimed charger control: live limit=6 A, failsafe=6 A after 30 s"
+        in caplog.text
+    )
+
+
 class FakeBus:
     def __init__(self) -> None:
         self.callback = None
@@ -279,16 +292,6 @@ def _integration_fakes(monkeypatch, *, requested: bool):
 
         async def async_suspend(self, *, preserve_requested: bool) -> bool:
             events.append(f"suspend:{preserve_requested}")
-            return True
-
-        async def async_capture_original_current_limit(self) -> None:
-            events.append("old_capture")
-
-        async def async_claim_connection(self) -> None:
-            events.append("old_claim")
-
-        async def async_restore_original_current_limit(self) -> bool:
-            events.append("old_restore")
             return True
 
         async def async_read_device_info(self) -> None:
@@ -377,3 +380,44 @@ def test_shutdown_listener_suspends_with_requested_state_preserved(monkeypatch):
     asyncio.run(bus.callback(SimpleNamespace()))
 
     assert events == ["suspend:True"]
+
+
+def test_version_one_migration_requires_explicit_baseline_confirmation():
+    updates: list[tuple[dict, int]] = []
+
+    class ConfigEntries:
+        def async_update_entry(self, entry, *, data, version) -> None:
+            entry.data = data
+            entry.version = version
+            updates.append((dict(data), version))
+
+    hass = SimpleNamespace(config_entries=ConfigEntries())
+    entry = SimpleNamespace(
+        version=1,
+        data={"host": "charger", "port": 502, "unit_id": 255},
+    )
+
+    assert asyncio.run(integration.async_migrate_entry(hass, entry)) is True
+    assert entry.version == 2
+    assert entry.data["baseline_required"] is True
+    assert entry.data["automatic_control"] is False
+    assert entry.data["ownership_dirty"] is False
+    assert updates == [(entry.data, 2)]
+
+
+def test_confirmed_activation_clears_legacy_marker_after_snapshot_capture():
+    coordinator, _client, events = _coordinator(
+        data={"baseline_required": True, "automatic_control": False}
+    )
+
+    asyncio.run(coordinator.async_activate())
+
+    snapshot_persist = next(
+        event[1]
+        for event in events
+        if event[0] == "persist" and event[1].get("ownership_dirty") is True
+    )
+    assert "baseline_required" not in snapshot_persist
+    assert snapshot_persist["original_current_limit"] == 20
+    assert snapshot_persist["original_failsafe_current"] == 12
+    assert snapshot_persist["original_failsafe_timeout"] == 45

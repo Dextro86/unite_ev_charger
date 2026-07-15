@@ -165,7 +165,7 @@ def _num(minv: float, maxv: float, step: float = 1, unit: str | None = None) -> 
 class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
     """Initial connection setup."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None

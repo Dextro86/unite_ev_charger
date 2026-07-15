@@ -20,6 +20,7 @@ from . import registers as R
 from .const import (
     ABS_MAX_CURRENT_A,
     CONF_AUTOMATIC_CONTROL,
+    CONF_BASELINE_REQUIRED,
     CONF_CONTROL_MODE,
     CONF_DLB_ENABLED,
     CONF_FAILSAFE_CURRENT,
@@ -283,7 +284,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         }
         if phase is not None:
             updates[CONF_ORIGINAL_PHASE_SWITCH] = phase
-        self._persist_ownership_data(updates)
+        self._persist_ownership_data(updates, remove=(CONF_BASELINE_REQUIRED,))
         _LOGGER.info(
             "Captured original charger configuration: register 5004=%s A, "
             "2000=%s A, 2002=%s s, 405=%s",
@@ -427,52 +428,6 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         max_a = await _try(R.MAX_CURRENT_CABLE_A)
         if max_a:
             self.device.max_current_a = int(max_a)
-
-    async def async_capture_original_current_limit(self) -> int:
-        """Persist register 5004 once, before this integration takes ownership."""
-        stored = self.entry.data.get(CONF_ORIGINAL_CURRENT_LIMIT)
-        if stored is not None:
-            _LOGGER.info("Using stored original charging-current limit: %s A", stored)
-            return int(stored)
-
-        original = int(await self.client.read_register(R.SET_CURRENT_A))
-        if not 0 <= original <= ABS_MAX_CURRENT_A:
-            raise WebastoModbusError(
-                f"Original charging-current limit {original} is outside "
-                f"0..{ABS_MAX_CURRENT_A} A"
-            )
-        self.hass.config_entries.async_update_entry(
-            self.entry,
-            data={**self.entry.data, CONF_ORIGINAL_CURRENT_LIMIT: original},
-        )
-        _LOGGER.info(
-            "Captured original charging-current limit from register 5004: %s A",
-            original,
-        )
-        return original
-
-    async def async_restore_original_current_limit(self) -> bool:
-        """Best-effort restoration of register 5004 before releasing ownership."""
-        original = self.entry.data.get(CONF_ORIGINAL_CURRENT_LIMIT)
-        if original is None:
-            _LOGGER.warning(
-                "Cannot restore charging-current limit: original value is missing"
-            )
-            return False
-        try:
-            await self.client.write_register(R.SET_CURRENT_A, int(original))
-        except WebastoModbusError as err:
-            _LOGGER.warning(
-                "Could not restore original charging-current limit to %s A: %s",
-                original,
-                err,
-            )
-            return False
-        _LOGGER.info(
-            "Restored original charging-current limit to register 5004: %s A",
-            original,
-        )
-        return True
 
     async def _async_update_data(self) -> WallboxData:
         if not self.ownership_active:

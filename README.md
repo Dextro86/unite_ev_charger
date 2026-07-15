@@ -29,7 +29,10 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
   - **Solar** — charge from PV surplus only; pauses when there is too little sun.
   - **Minimum plus Solar** — always at least a minimum, follow surplus above it
     (keeps charging at the minimum if the sensor is briefly unavailable).
-- **Charging toggle** — a master on/off switch (default on).
+- **Automatic charger control** — explicitly claims or releases Modbus EMS
+  ownership. Releasing it restores the pre-control charger configuration.
+- **Charging toggle** — allows or pauses charging while automatic control owns
+  the charger.
 - **Default mode** — each new session starts in your configured default
   (reverts when the car is unplugged, evcc-style).
 - **Dynamic Load Balancing (DLB)** — caps charging per phase so you never exceed
@@ -80,6 +83,12 @@ Copy `custom_components/unite_ev_charger` into your Home Assistant
 
 That gets you monitoring and Fast/Manual control. Solar, DLB, evcc and the restart
 button are configured afterwards via **Configure**.
+
+Upgrading an existing entry from a version that did not save the original
+failsafe registers disables automatic control once and raises a Home Assistant
+repair issue. Return the charger to a known autonomous configuration, then turn
+on **Automatic charger control** to capture a trustworthy baseline. The
+integration never assumes missing original values.
 
 ## Configuration (Configure → Settings)
 
@@ -163,8 +172,22 @@ Note: register `405` resets to its `404` default on **every** Modbus disconnect
 
 ## Modbus ownership, failsafe & reconnect
 
-The Vestel firmware expects the master to *own* the connection, and the
-integration follows that contract:
+Fast, Manual, Solar and evcc are current-control strategies. DLB is a separate
+per-phase safety ceiling; turning DLB off does not release charger ownership.
+The **Automatic charger control** switch is the ownership boundary.
+
+When automatic control turns on, the integration first reads and persists
+registers `5004` (current limit), `2000` (failsafe current), `2002` (failsafe
+timeout), and `405` when phase control can change it. Only after that complete
+snapshot is durable does it configure EMS control and start the heartbeat.
+
+When automatic control turns off, or the entry unloads, reloads, is removed, or
+Home Assistant shuts down, the integration keeps Alive running while it restores
+those values in order, reads them back, then stops Alive and closes Modbus.
+Failed restoration retains the snapshot, reports an error, and retries; it is
+never reported as a successful release.
+
+The remaining connection contract is:
 
 - **Failsafe** — on every new connection it writes the failsafe current + timeout,
   puts the live current limit at the failsafe value, then sends an **alive**
@@ -180,14 +203,22 @@ integration follows that contract:
 - **Reconnect handshake** — a power-cycled or still-booting wallbox is picked up
   automatically: on the next successful poll the integration re-claims ownership
   (failsafe + charging current + phase + alive).
-- **Original current limit** — before its first ownership write, the integration
-  reads register `5004` and persists that exact value. Unload and removal restore
-  it before closing Modbus (best effort if the charger is unreachable). Reloads
-  never redefine the original value. Turning off DLB alone does not release
-  ownership because Fast, Manual and Solar modes still control `5004`.
+- **Per-session originals** — after a verified release the snapshot is cleared.
+  A later activation captures fresh autonomous values, so changes made while
+  suspended are preserved. A restart during active control reuses the dirty
+  snapshot and never recaptures integration-modified values as originals.
+- **Suspended means autonomous** — Modbus is closed and charger-backed entities
+  are unavailable. Passive reads are not attempted because a Unite Modbus
+  session cannot yet be proven not to affect EMS state.
 - **Robust 404 read** — the phase-capability register is re-read every cycle (a
   Unite can report it wrong while booting), so a single bad read never disables
   phase switching for the session.
+
+If the charger is powered off or unreachable, software cannot restore its
+registers. The integration retains the recovery snapshot, logs every original
+value, and refuses to claim a clean release. After a sudden Home Assistant crash,
+the wallbox hardware watchdog remains the immediate protection; automatic
+control resumes from the persisted snapshot when Home Assistant returns.
 
 ## Restart button (web UI)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from enum import Enum
 from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "unite_ev_charger"
@@ -29,12 +30,25 @@ for _mod in (
     "homeassistant.core",
     "homeassistant.exceptions",
     "homeassistant.helpers",
+    "homeassistant.helpers.issue_registry",
     "homeassistant.helpers.update_coordinator",
 ):
     sys.modules.setdefault(_mod, types.ModuleType(_mod))
 sys.modules["homeassistant.config_entries"].ConfigEntry = object
 sys.modules["homeassistant.const"].EVENT_HOMEASSISTANT_STOP = "homeassistant_stop"
 sys.modules["homeassistant.core"].HomeAssistant = object
+
+
+class _IssueSeverity(str, Enum):
+    WARNING = "warning"
+
+
+sys.modules["homeassistant.helpers.issue_registry"].IssueSeverity = _IssueSeverity
+sys.modules["homeassistant.helpers.issue_registry"].async_create_issue = lambda *_args, **_kwargs: None
+sys.modules["homeassistant.helpers.issue_registry"].async_delete_issue = lambda *_args, **_kwargs: None
+sys.modules["homeassistant.helpers"].issue_registry = sys.modules[
+    "homeassistant.helpers.issue_registry"
+]
 
 
 class _ConfigEntryNotReady(Exception):

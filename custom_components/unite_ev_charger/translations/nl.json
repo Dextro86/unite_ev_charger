@@ -29,6 +29,12 @@
       "already_configured": "Deze lader is al geconfigureerd."
     }
   },
+  "issues": {
+    "legacy_baseline_required": {
+      "title": "Bevestig de laderconfiguratie vóór automatische regeling",
+      "description": "Een eerdere integratieversie wijzigde de failsafe-registers zonder de oorspronkelijke waarden op te slaan. Automatische regeling is uitgeschakeld omdat deze waarden niet veilig kunnen worden aangenomen. Breng de lader terug naar een bekende autonome configuratie en schakel daarna Automatische laderregeling in. De integratie leest registers 5004, 2000, 2002 en 405 voordat zij iets wijzigt."
+    }
+  },
   "entity": {
     "sensor": {
       "charge_point_state": {
@@ -88,7 +94,8 @@
       "connection": { "name": "Verbinding" }
     },
     "switch": {
-      "charging": { "name": "Laden" }
+      "charging": { "name": "Laden" },
+      "automatic_control": { "name": "Automatische laderregeling" }
     },
     "select": {
       "mode": {
