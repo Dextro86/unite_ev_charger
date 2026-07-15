@@ -6,8 +6,11 @@ handful of Modbus transactions every poll interval, instead of dozens.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -16,14 +19,22 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from . import registers as R
 from .const import (
     ABS_MAX_CURRENT_A,
+    CONF_AUTOMATIC_CONTROL,
+    CONF_CONTROL_MODE,
     CONF_DLB_ENABLED,
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
+    CONF_ORIGINAL_FAILSAFE_CURRENT,
+    CONF_ORIGINAL_FAILSAFE_TIMEOUT,
     CONF_ORIGINAL_CURRENT_LIMIT,
+    CONF_ORIGINAL_PHASE_SWITCH,
+    CONF_OWNERSHIP_DIRTY,
+    CONF_PHASE_SWITCHING,
     CONF_POLL_INTERVAL,
     CONF_TELEMETRY_REGISTER_TYPE,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
+    CONTROL_EXTERNAL,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_TELEMETRY_REGISTER_TYPE,
     DOMAIN,
@@ -40,6 +51,35 @@ from .safety import program_failsafe, write_heartbeat
 _LOGGER = logging.getLogger(__name__)
 
 
+class OwnershipState(str, Enum):
+    """Runtime EMS ownership lifecycle."""
+
+    DISABLED = "disabled"
+    INITIALIZING = "initializing"
+    ACTIVE = "active"
+    SUSPENDING = "suspending"
+    SUSPENDED = "suspended"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class OriginalChargerConfig:
+    """Charger values captured before one EMS ownership session."""
+
+    current_limit: int
+    failsafe_current: int
+    failsafe_timeout: int
+    phase_switch: int | None = None
+
+
+_SNAPSHOT_KEYS = (
+    CONF_ORIGINAL_CURRENT_LIMIT,
+    CONF_ORIGINAL_FAILSAFE_CURRENT,
+    CONF_ORIGINAL_FAILSAFE_TIMEOUT,
+    CONF_ORIGINAL_PHASE_SWITCH,
+)
+
+
 class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
     """Coordinates polling and (later) control for one wallbox."""
 
@@ -53,6 +93,12 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         self.client = client
         self.device = DeviceInfo()
         self.controller = None  # wired in once control is built
+        self._ownership_lock = asyncio.Lock()
+        self._ownership_state = (
+            OwnershipState.ERROR
+            if entry.data.get(CONF_OWNERSHIP_DIRTY)
+            else OwnershipState.DISABLED
+        )
         # monotonic deadline until which a web-UI reboot is considered in
         # progress (set by the restart button); drives the 'restarting' state.
         self.rest_restart_until: float | None = None
@@ -90,6 +136,253 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             name=DOMAIN,
             update_interval=timedelta(seconds=effective_poll),
         )
+
+    def _ensure_ownership_runtime(self) -> None:
+        """Initialise lifecycle fields for normal and lightweight test instances."""
+        if not hasattr(self, "_ownership_lock"):
+            self._ownership_lock = asyncio.Lock()
+        if not hasattr(self, "_ownership_state"):
+            self._ownership_state = (
+                OwnershipState.ERROR
+                if self.entry.data.get(CONF_OWNERSHIP_DIRTY)
+                else OwnershipState.DISABLED
+            )
+
+    @property
+    def ownership_state(self) -> OwnershipState:
+        self._ensure_ownership_runtime()
+        return self._ownership_state
+
+    @property
+    def automatic_control_requested(self) -> bool:
+        return bool(self.entry.data.get(CONF_AUTOMATIC_CONTROL, True))
+
+    @property
+    def ownership_dirty(self) -> bool:
+        return bool(self.entry.data.get(CONF_OWNERSHIP_DIRTY, False))
+
+    @property
+    def ownership_active(self) -> bool:
+        return self.ownership_state is OwnershipState.ACTIVE
+
+    @property
+    def original_configuration(self) -> OriginalChargerConfig | None:
+        data = self.entry.data
+        required = (
+            CONF_ORIGINAL_CURRENT_LIMIT,
+            CONF_ORIGINAL_FAILSAFE_CURRENT,
+            CONF_ORIGINAL_FAILSAFE_TIMEOUT,
+        )
+        if not self.ownership_dirty or any(key not in data for key in required):
+            return None
+        phase = data.get(CONF_ORIGINAL_PHASE_SWITCH)
+        return OriginalChargerConfig(
+            current_limit=int(data[CONF_ORIGINAL_CURRENT_LIMIT]),
+            failsafe_current=int(data[CONF_ORIGINAL_FAILSAFE_CURRENT]),
+            failsafe_timeout=int(data[CONF_ORIGINAL_FAILSAFE_TIMEOUT]),
+            phase_switch=None if phase is None else int(phase),
+        )
+
+    def _set_ownership_state(self, state: OwnershipState, reason: str) -> None:
+        previous = self.ownership_state
+        if previous is state:
+            return
+        self._ownership_state = state
+        _LOGGER.info(
+            "EMS ownership state %s -> %s: %s",
+            previous.value,
+            state.value,
+            reason,
+        )
+        update_listeners = getattr(self, "async_update_listeners", None)
+        if callable(update_listeners):
+            update_listeners()
+
+    def _persist_ownership_data(
+        self,
+        updates: dict[str, object],
+        *,
+        remove: tuple[str, ...] = (),
+    ) -> None:
+        data = dict(self.entry.data)
+        data.update(updates)
+        for key in remove:
+            data.pop(key, None)
+        if data == self.entry.data:
+            return
+        self.hass.config_entries.async_update_entry(self.entry, data=data)
+
+    def _phase_may_be_owned(self) -> bool:
+        options = self.entry.options
+        return bool(options.get(CONF_PHASE_SWITCHING, False)) or (
+            options.get(CONF_CONTROL_MODE) == CONTROL_EXTERNAL
+        )
+
+    async def _async_capture_original_configuration(self) -> OriginalChargerConfig:
+        """Read and durably persist one ownership-session baseline."""
+        current = int(await self.client.read_register(R.SET_CURRENT_A))
+        failsafe_current = int(await self.client.read_register(R.FAILSAFE_CURRENT_A))
+        failsafe_timeout = int(await self.client.read_register(R.FAILSAFE_TIMEOUT_S))
+        phase = (
+            int(await self.client.read_register(R.PHASE_SWITCH))
+            if self._phase_may_be_owned()
+            else None
+        )
+
+        if not 0 <= current <= ABS_MAX_CURRENT_A:
+            raise WebastoModbusError(
+                f"Original charging-current limit {current} is outside "
+                f"0..{ABS_MAX_CURRENT_A} A"
+            )
+        if not 0 <= failsafe_current <= ABS_MAX_CURRENT_A:
+            raise WebastoModbusError(
+                f"Original failsafe current {failsafe_current} is outside "
+                f"0..{ABS_MAX_CURRENT_A} A"
+            )
+        if not 0 <= failsafe_timeout <= 0xFFFF:
+            raise WebastoModbusError(
+                f"Original failsafe timeout {failsafe_timeout} is outside 0..65535 s"
+            )
+        if phase is not None and phase not in (0, 1):
+            raise WebastoModbusError(
+                f"Original phase selection {phase} is outside 0..1"
+            )
+
+        original = OriginalChargerConfig(
+            current_limit=current,
+            failsafe_current=failsafe_current,
+            failsafe_timeout=failsafe_timeout,
+            phase_switch=phase,
+        )
+        updates: dict[str, object] = {
+            CONF_AUTOMATIC_CONTROL: True,
+            CONF_OWNERSHIP_DIRTY: True,
+            CONF_ORIGINAL_CURRENT_LIMIT: current,
+            CONF_ORIGINAL_FAILSAFE_CURRENT: failsafe_current,
+            CONF_ORIGINAL_FAILSAFE_TIMEOUT: failsafe_timeout,
+        }
+        if phase is not None:
+            updates[CONF_ORIGINAL_PHASE_SWITCH] = phase
+        self._persist_ownership_data(updates)
+        _LOGGER.info(
+            "Captured original charger configuration: register 5004=%s A, "
+            "2000=%s A, 2002=%s s, 405=%s",
+            current,
+            failsafe_current,
+            failsafe_timeout,
+            phase if phase is not None else "not owned",
+        )
+        return original
+
+    async def async_activate(self) -> None:
+        """Capture a lease and claim EMS control exactly once."""
+        self._ensure_ownership_runtime()
+        async with self._ownership_lock:
+            if self.ownership_state is OwnershipState.ACTIVE:
+                return
+            self._set_ownership_state(OwnershipState.INITIALIZING, "control requested")
+            try:
+                original = self.original_configuration
+                if self.ownership_dirty and original is None:
+                    raise WebastoModbusError(
+                        "Dirty EMS ownership record is incomplete; refusing to recapture"
+                    )
+                if original is None:
+                    original = await self._async_capture_original_configuration()
+                else:
+                    self._persist_ownership_data({CONF_AUTOMATIC_CONTROL: True})
+                    _LOGGER.info(
+                        "Resuming EMS ownership with stored originals: "
+                        "5004=%s A, 2000=%s A, 2002=%s s, 405=%s",
+                        original.current_limit,
+                        original.failsafe_current,
+                        original.failsafe_timeout,
+                        original.phase_switch,
+                    )
+                await self.async_claim_connection()
+            except WebastoModbusError:
+                if self.ownership_dirty:
+                    await self._async_restore_locked(preserve_requested=True)
+                else:
+                    self._set_ownership_state(OwnershipState.ERROR, "activation failed")
+                    await self.client.async_close()
+                raise
+            self._set_ownership_state(OwnershipState.ACTIVE, "control handshake complete")
+
+    async def async_suspend(self, *, preserve_requested: bool) -> bool:
+        """Restore the current lease before releasing EMS ownership."""
+        self._ensure_ownership_runtime()
+        async with self._ownership_lock:
+            return await self._async_restore_locked(
+                preserve_requested=preserve_requested
+            )
+
+    async def _async_restore_locked(self, *, preserve_requested: bool) -> bool:
+        if not preserve_requested and self.automatic_control_requested:
+            self._persist_ownership_data({CONF_AUTOMATIC_CONTROL: False})
+
+        original = self.original_configuration
+        if original is None:
+            if getattr(self.client, "connected", False):
+                await self.client.async_close()
+            self._set_ownership_state(OwnershipState.SUSPENDED, "no active lease")
+            return True
+
+        self._set_ownership_state(OwnershipState.SUSPENDING, "restoring charger")
+        if self.controller is not None:
+            await self.controller.async_shutdown()
+
+        registers: list[tuple[R.RegisterDef, int]] = [
+            (R.SET_CURRENT_A, original.current_limit),
+            (R.FAILSAFE_CURRENT_A, original.failsafe_current),
+            (R.FAILSAFE_TIMEOUT_S, original.failsafe_timeout),
+        ]
+        if original.phase_switch is not None:
+            registers.append((R.PHASE_SWITCH, original.phase_switch))
+
+        try:
+            await write_heartbeat(self.client)
+            for register, value in registers:
+                await self.client.write_register(register, value)
+                _LOGGER.info(
+                    "Restored original register %s (%s) to %s",
+                    register.address,
+                    register.name,
+                    value,
+                )
+            for register, expected in registers:
+                actual = int(await self.client.read_register(register))
+                if actual != expected:
+                    raise WebastoModbusError(
+                        f"Restore verification failed for register {register.address}: "
+                        f"expected {expected}, got {actual}"
+                    )
+                _LOGGER.info(
+                    "Verified original register %s (%s): %s",
+                    register.address,
+                    register.name,
+                    actual,
+                )
+        except WebastoModbusError as err:
+            self._set_ownership_state(OwnershipState.ERROR, "restoration failed")
+            _LOGGER.error(
+                "Could not release EMS ownership; retaining originals "
+                "5004=%s A, 2000=%s A, 2002=%s s, 405=%s: %s",
+                original.current_limit,
+                original.failsafe_current,
+                original.failsafe_timeout,
+                original.phase_switch,
+                err,
+            )
+            return False
+
+        await self.client.async_close()
+        self._persist_ownership_data(
+            {CONF_OWNERSHIP_DIRTY: False},
+            remove=_SNAPSHOT_KEYS,
+        )
+        self._set_ownership_state(OwnershipState.SUSPENDED, "charger restored")
+        return True
 
     async def async_read_device_info(self) -> None:
         """Read static identity once. Best effort - missing fields are tolerated."""

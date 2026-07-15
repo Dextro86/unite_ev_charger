@@ -15,6 +15,12 @@ CONF_PORT: Final = "port"
 CONF_UNIT_ID: Final = "unit_id"
 CONF_POLL_INTERVAL: Final = "poll_interval"
 CONF_ORIGINAL_CURRENT_LIMIT: Final = "original_current_limit"
+CONF_AUTOMATIC_CONTROL: Final = "automatic_control"
+CONF_OWNERSHIP_DIRTY: Final = "ownership_dirty"
+CONF_ORIGINAL_FAILSAFE_CURRENT: Final = "original_failsafe_current"
+CONF_ORIGINAL_FAILSAFE_TIMEOUT: Final = "original_failsafe_timeout"
+CONF_ORIGINAL_PHASE_SWITCH: Final = "original_phase_switch"
+CONF_BASELINE_REQUIRED: Final = "baseline_required"
 
 DEFAULT_PORT: Final = 502
 # Vestel/Webasto firmware answers on Modbus unit id 255.
