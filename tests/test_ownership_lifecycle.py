@@ -477,6 +477,60 @@ def test_initialization_write_failure_rolls_back_snapshot():
     assert _state(coordinator) == "suspended"
 
 
+@pytest.mark.parametrize("rollback_failure", ["exception", "cancellation"])
+def test_activation_failure_preserves_original_when_rollback_fails(
+    caplog, rollback_failure
+):
+    coordinator, client, _events = _coordinator()
+    client.fail_write_once = R.FAILSAFE_TIMEOUT_S.name
+
+    class FailingRollbackController(FakeController):
+        async def async_shutdown(self) -> None:
+            if rollback_failure == "cancellation":
+                raise asyncio.CancelledError
+            raise RuntimeError("rollback exploded")
+
+    coordinator.controller = FailingRollbackController()
+
+    with caplog.at_level(logging.CRITICAL, logger="uec.coordinator"):
+        with pytest.raises(
+            WebastoModbusError,
+            match=f"cannot write {R.FAILSAFE_TIMEOUT_S.name}",
+        ):
+            asyncio.run(coordinator.async_activate())
+
+    assert coordinator.entry.data["ownership_dirty"] is True
+    assert "activation rollback" in caplog.text
+    assert "ownership journal retained" in caplog.text
+
+
+def test_external_cancellation_during_activation_rollback_is_not_swallowed(caplog):
+    async def exercise() -> WebastoCoordinator:
+        coordinator, client, _events = _coordinator()
+        client.fail_write_once = R.FAILSAFE_TIMEOUT_S.name
+        rollback_started = asyncio.Event()
+
+        class BlockingRollbackController(FakeController):
+            async def async_shutdown(self) -> None:
+                rollback_started.set()
+                await asyncio.Event().wait()
+
+        coordinator.controller = BlockingRollbackController()
+        activation = asyncio.create_task(coordinator.async_activate())
+        await rollback_started.wait()
+        activation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await activation
+        return coordinator
+
+    with caplog.at_level(logging.CRITICAL, logger="uec.coordinator"):
+        coordinator = asyncio.run(exercise())
+
+    assert coordinator.entry.data["ownership_dirty"] is True
+    assert "activation rollback" in caplog.text
+    assert "ownership journal retained" in caplog.text
+
+
 def test_failsafe_programming_is_required_without_dlb():
     coordinator, client, _events = _coordinator()
     coordinator.entry.options["dlb_enabled"] = False
@@ -587,6 +641,7 @@ def _integration_fakes(
     fail_at: str | None = None,
     restore_success: bool = True,
     restore_error: bool = False,
+    loaded_record: dict | None = None,
 ):
     events: list[str] = []
 
@@ -606,6 +661,11 @@ def _integration_fakes(
 
         async def async_load_ownership_record(self) -> None:
             events.append("load")
+            if loaded_record is not None:
+                self.entry.data.update(loaded_record)
+                self._ownership_dirty = bool(
+                    loaded_record.get("ownership_dirty", False)
+                )
 
         @property
         def automatic_control_requested(self) -> bool:
@@ -815,19 +875,47 @@ def test_remove_after_clean_unload_deletes_journal_without_reconnecting(monkeypa
 
     asyncio.run(integration.async_remove_entry(hass, entry))
 
-    assert events == ["remove_journal"]
+    assert events == ["load", "remove_journal"]
+
+
+def test_remove_loads_authoritative_dirty_store_before_cleanup(monkeypatch, caplog):
+    dirty_record = {
+        "automatic_control": True,
+        "ownership_dirty": True,
+        "original_current_limit": 20,
+        "original_failsafe_current": 12,
+        "original_failsafe_timeout": 45,
+        "original_phase_switch": 0,
+    }
+    hass, entry, events, _bus = _integration_fakes(
+        monkeypatch,
+        requested=False,
+        restore_success=False,
+        loaded_record=dirty_record,
+    )
+    assert entry.data.get("ownership_dirty") is not True
+
+    with caplog.at_level(logging.CRITICAL, logger="uec.integration"):
+        asyncio.run(integration.async_remove_entry(hass, entry))
+
+    assert events == ["load", "suspend:True"]
+    assert entry.data["ownership_dirty"] is True
+    assert "remove_journal" not in events
+    assert "journal retained" in caplog.text
 
 
 def test_remove_orphan_dirty_journal_retains_manual_recovery_evidence(
     monkeypatch, caplog
 ):
-    hass, entry, events, _bus = _integration_fakes(monkeypatch, requested=False)
+    hass, entry, events, _bus = _integration_fakes(
+        monkeypatch, requested=False, restore_success=False
+    )
     entry.data["ownership_dirty"] = True
 
     with caplog.at_level(logging.CRITICAL, logger="uec.integration"):
         asyncio.run(integration.async_remove_entry(hass, entry))
 
-    assert events == []
+    assert events == ["load", "suspend:True"]
     assert entry.data["ownership_dirty"] is True
     assert "manual charger recovery required" in caplog.text
     assert "journal retained" in caplog.text

@@ -163,7 +163,6 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove only recovery data proven clean before config-entry deletion."""
     domain_data = hass.data.get(DOMAIN, {})
     coordinator: WebastoCoordinator | None = domain_data.pop(entry.entry_id, None)
-    retained = coordinator is not None
     if coordinator is None:
         client = WebastoModbus(
             host=entry.data[CONF_HOST],
@@ -171,14 +170,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
             unit_id=entry.data.get(CONF_UNIT_ID, DEFAULT_UNIT_ID),
         )
         coordinator = WebastoCoordinator(hass, entry, client)
+        await coordinator.async_load_ownership_record()
 
     if coordinator.ownership_dirty:
-        if not retained:
-            _LOGGER.critical(
-                "Config entry removed with a dirty EMS ownership journal; "
-                "manual charger recovery required and journal retained"
-            )
-            return
         try:
             restored = await coordinator.async_suspend(preserve_requested=True)
         except asyncio.CancelledError:

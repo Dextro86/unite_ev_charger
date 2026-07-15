@@ -384,7 +384,37 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                 await self._async_claim_connection_locked()
             except WebastoModbusError:
                 if self.ownership_dirty:
-                    await self._async_restore_locked(preserve_requested=True)
+                    try:
+                        restored = await self._async_restore_locked(
+                            preserve_requested=True
+                        )
+                    except asyncio.CancelledError:
+                        self._set_ownership_state(
+                            OwnershipState.ERROR, "activation rollback cancelled"
+                        )
+                        _LOGGER.critical(
+                            "Charger activation failed and activation rollback was "
+                            "cancelled; ownership journal retained",
+                            exc_info=True,
+                        )
+                        task = asyncio.current_task()
+                        if task is not None and task.cancelling():
+                            raise
+                    except Exception:
+                        self._set_ownership_state(
+                            OwnershipState.ERROR, "activation rollback failed"
+                        )
+                        _LOGGER.critical(
+                            "Charger activation failed and activation rollback also "
+                            "failed; ownership journal retained",
+                            exc_info=True,
+                        )
+                    else:
+                        if not restored:
+                            _LOGGER.critical(
+                                "Charger activation failed and activation rollback "
+                                "also failed; ownership journal retained"
+                            )
                 else:
                     self._set_ownership_state(OwnershipState.ERROR, "activation failed")
                     await self.client.async_close()
