@@ -106,7 +106,7 @@ def _set_grid(hass: FakeHass, values: tuple[float, float, float], updated: datet
         hass.states.set(f"sensor.grid_l{phase}", value, updated)
 
 
-def test_missing_required_phase_applies_failsafe_and_withholds_heartbeat():
+def test_missing_required_phase_stops_and_withholds_heartbeat():
     control, hass, client = _control()
     now = datetime.now(timezone.utc)
     hass.states.set("sensor.grid_l1", 10, now)
@@ -114,14 +114,14 @@ def test_missing_required_phase_applies_failsafe_and_withholds_heartbeat():
 
     asyncio.run(control.async_apply(_data()))
 
-    assert client.writes == [("set_current_a", 6)]
-    assert control.computed_setpoint == 6
+    assert client.writes == [("set_current_a", 0)]
+    assert control.computed_setpoint == 0
     assert control.dlb_healthy is False
     assert "L2" in control.dlb_failure_reason
     assert control.heartbeat_allowed is False
 
 
-def test_stale_phase_applies_failsafe():
+def test_stale_phase_stops_and_withholds_heartbeat():
     control, hass, client = _control()
     control._started_at = datetime.now(timezone.utc) - timedelta(minutes=2)
     stale = datetime.now(timezone.utc) - timedelta(seconds=31)
@@ -129,7 +129,20 @@ def test_stale_phase_applies_failsafe():
 
     asyncio.run(control.async_apply(_data()))
 
-    assert client.writes == [("set_current_a", 6)]
+    assert client.writes == [("set_current_a", 0)]
+    assert control.computed_setpoint == 0
+    assert control.dlb_healthy is False
+    assert control.heartbeat_allowed is False
+
+
+def test_non_finite_phase_stops_and_withholds_heartbeat():
+    control, hass, client = _control()
+    _set_grid(hass, (10, float("nan"), 10), datetime.now(timezone.utc))
+
+    asyncio.run(control.async_apply(_data()))
+
+    assert client.writes == [("set_current_a", 0)]
+    assert control.computed_setpoint == 0
     assert control.dlb_healthy is False
     assert control.heartbeat_allowed is False
 
@@ -171,14 +184,30 @@ def test_increases_wait_and_step_while_reductions_are_immediate():
     assert control._limit_increase(5, 8, limits) == 5
 
 
-def test_implausible_grid_current_fails_closed():
-    control, hass, _ = _control()
+def test_implausible_grid_current_stops_and_withholds_heartbeat():
+    control, hass, client = _control()
     _set_grid(hass, (10, 1000, 10), datetime.now(timezone.utc))
 
-    cap, error = control._dlb_cap(_data())
+    asyncio.run(control.async_apply(_data()))
 
-    assert cap is None
-    assert "implausible" in error
+    assert client.writes == [("set_current_a", 0)]
+    assert control.computed_setpoint == 0
+    assert control.dlb_healthy is False
+    assert "implausible" in control.dlb_failure_reason
+    assert control.heartbeat_allowed is False
+
+
+def test_invalid_dlb_input_stops_even_with_positive_communication_failsafe():
+    control, hass, client = _control(failsafe_current=32)
+    now = datetime.now(timezone.utc)
+    hass.states.set("sensor.grid_l1", 10, now)
+    hass.states.set("sensor.grid_l3", 10, now)
+
+    asyncio.run(control.async_apply(_data(set_current=32)))
+
+    assert client.writes == [("set_current_a", 0)]
+    assert control.computed_setpoint == 0
+    assert control.heartbeat_allowed is False
 
 
 def test_dlb_failure_and_recovery_logs_are_transition_only(caplog):
@@ -194,11 +223,28 @@ def test_dlb_failure_and_recovery_logs_are_transition_only(caplog):
         asyncio.run(control.async_apply(_data(set_current=6)))
 
     assert caplog.text.count("DLB paused:") == 1
-    assert "applying 6 A failsafe and withholding Alive" in caplog.text
+    assert "applying 0 A stop and withholding Alive" in caplog.text
     assert (
         "DLB input recovered; normal control and Alive heartbeat resumed"
         in caplog.text
     )
+
+
+def test_dlb_recovery_uses_normal_increase_delay_and_ramp():
+    control, hass, client = _control()
+    now = datetime.now(timezone.utc)
+    hass.states.set("sensor.grid_l1", 10, now)
+    hass.states.set("sensor.grid_l3", 10, now)
+
+    asyncio.run(control.async_apply(_data()))
+    _set_grid(hass, (10, 10, 10), datetime.now(timezone.utc))
+    asyncio.run(control.async_apply(_data(set_current=0)))
+    control._increase_since = monotonic() - 11
+    asyncio.run(control.async_apply(_data(set_current=0)))
+
+    assert client.writes == [("set_current_a", 0), ("set_current_a", 6)]
+    assert control.computed_setpoint == 6
+    assert control.heartbeat_allowed is True
 
 
 def test_dlb_calculation_logs_inputs_and_cap_at_debug(caplog):

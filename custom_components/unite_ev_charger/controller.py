@@ -803,9 +803,8 @@ class ChargeControl:
         self.dlb_failure_reason = reason
         if healthy is False and (previous is not False or previous_reason != reason):
             _LOGGER.warning(
-                "DLB paused: %s; applying %s A failsafe and withholding Alive",
+                "DLB paused: %s; applying 0 A stop and withholding Alive",
                 reason,
-                self.cfg.failsafe_current,
             )
         elif healthy is True and previous is False:
             _LOGGER.info(
@@ -816,10 +815,9 @@ class ChargeControl:
         self._set_dlb_health(False, reason)
         self._heartbeat_allowed = False
         self._increase_since = None
-        setpoint = max(0, min(ABS_MAX_CURRENT_A, self.cfg.failsafe_current))
-        self.computed_setpoint = setpoint
+        self.computed_setpoint = 0
         await self._write_setpoint(
-            setpoint,
+            0,
             current_limit=data.set_current_a,
             bypass_quiet=True,
         )
