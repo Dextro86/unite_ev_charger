@@ -7,9 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from homeassistant.helpers.update_coordinator import UpdateFailed
+import uec.coordinator as coordinator_module
 from uec import registers as R
 from uec import integration
-from uec.coordinator import WebastoCoordinator
+from uec.coordinator import OwnershipState, WebastoCoordinator
 from uec.modbus import WebastoModbusError
 
 
@@ -44,8 +46,14 @@ class FakeClient:
         self.fail_read: str | None = None
         self.fail_write_once: str | None = None
         self.fail_write: str | None = None
+        self.pause_next_setpoint = False
+        self.slow_operations = False
+        self.write_started = asyncio.Event()
+        self.allow_write = asyncio.Event()
 
     async def read_register(self, register) -> int:
+        if self.slow_operations:
+            await asyncio.sleep(0)
         name = register.name
         if self.fail_read == name:
             raise WebastoModbusError(f"cannot read {name}")
@@ -54,8 +62,14 @@ class FakeClient:
         return value
 
     async def write_register(self, register, value: int) -> None:
+        if self.slow_operations:
+            await asyncio.sleep(0)
         name = register.name
         self.events.append(("write", name, value))
+        if name == R.SET_CURRENT_A.name and self.pause_next_setpoint:
+            self.pause_next_setpoint = False
+            self.write_started.set()
+            await self.allow_write.wait()
         if self.fail_write == name:
             raise WebastoModbusError(f"cannot write {name}")
         if self.fail_write_once == name:
@@ -218,9 +232,16 @@ def test_disable_restores_verifies_then_closes_and_clears_snapshot():
     assert writes == [
         ("write", R.ALIVE.name, 1),
         ("write", R.SET_CURRENT_A.name, 20),
+        ("write", R.ALIVE.name, 1),
         ("write", R.FAILSAFE_CURRENT_A.name, 12),
+        ("write", R.ALIVE.name, 1),
         ("write", R.FAILSAFE_TIMEOUT_S.name, 45),
+        ("write", R.ALIVE.name, 1),
         ("write", R.PHASE_SWITCH.name, 0),
+        ("write", R.ALIVE.name, 1),
+        ("write", R.ALIVE.name, 1),
+        ("write", R.ALIVE.name, 1),
+        ("write", R.ALIVE.name, 1),
     ]
     verification_reads = [event[1] for event in events if event[0] == "read"]
     assert verification_reads == [
@@ -236,6 +257,120 @@ def test_disable_restores_verifies_then_closes_and_clears_snapshot():
     assert coordinator.entry.data["ownership_dirty"] is False
     assert "original_current_limit" not in coordinator.entry.data
     assert _state(coordinator) == "suspended"
+
+
+def test_slow_restoration_refreshes_alive_before_each_write_and_read():
+    coordinator, client, events = _coordinator()
+    asyncio.run(coordinator.async_activate())
+    events.clear()
+    client.slow_operations = True
+
+    assert asyncio.run(coordinator.async_suspend(preserve_requested=False)) is True
+
+    restored = {
+        R.SET_CURRENT_A.name,
+        R.FAILSAFE_CURRENT_A.name,
+        R.FAILSAFE_TIMEOUT_S.name,
+        R.PHASE_SWITCH.name,
+    }
+    operations = [
+        index
+        for index, event in enumerate(events)
+        if event[0] in {"write", "read"} and event[1] in restored
+    ]
+    assert operations
+    for index in operations:
+        assert events[index - 1] == ("write", R.ALIVE.name, 1)
+
+
+def test_owned_write_race_finishes_before_suspension_restores_originals():
+    async def exercise() -> list[tuple]:
+        coordinator, client, events = _coordinator()
+        await coordinator.async_activate()
+        client.pause_next_setpoint = True
+        control = asyncio.create_task(
+            coordinator.async_write_owned(R.SET_CURRENT_A, 16)
+        )
+        await client.write_started.wait()
+        suspend = asyncio.create_task(
+            coordinator.async_suspend(preserve_requested=False)
+        )
+        await asyncio.sleep(0)
+        client.allow_write.set()
+        await control
+        assert await suspend is True
+        return events
+
+    writes = [
+        event
+        for event in asyncio.run(exercise())
+        if event[0] == "write" and event[1] != R.ALIVE.name
+    ]
+    assert writes[-4:] == [
+        ("write", R.SET_CURRENT_A.name, 20),
+        ("write", R.FAILSAFE_CURRENT_A.name, 12),
+        ("write", R.FAILSAFE_TIMEOUT_S.name, 45),
+        ("write", R.PHASE_SWITCH.name, 0),
+    ]
+
+
+def test_owned_write_after_suspension_is_rejected():
+    async def exercise() -> None:
+        coordinator, client, _events = _coordinator()
+        await coordinator.async_activate()
+        client.pause_next_setpoint = True
+        suspend = asyncio.create_task(
+            coordinator.async_suspend(preserve_requested=False)
+        )
+        await client.write_started.wait()
+        control = asyncio.create_task(
+            coordinator.async_write_owned(R.SET_CURRENT_A, 16)
+        )
+        await asyncio.sleep(0)
+        client.allow_write.set()
+
+        with pytest.raises(WebastoModbusError, match="not active"):
+            await control
+        assert await suspend is True
+        assert client.values[R.SET_CURRENT_A.name] == 20
+
+    asyncio.run(exercise())
+
+
+def test_update_heartbeat_does_not_write_or_reset_state_after_suspension(monkeypatch):
+    async def exercise() -> WebastoCoordinator:
+        coordinator, client, _events = _coordinator()
+        await coordinator.async_activate()
+        client.values[R.NUMBER_OF_PHASES.name] = 3
+        client.take_new_connection = lambda: False
+        coordinator.device = SimpleNamespace(phases_supported=3)
+
+        async def read_telemetry() -> list[int]:
+            return []
+
+        async def read_session(*_args) -> list[int]:
+            return []
+
+        class SuspendingController(FakeController):
+            heartbeat_allowed = True
+
+            async def async_apply(self, _data) -> None:
+                assert await coordinator.async_suspend(preserve_requested=True) is True
+
+        coordinator._read_telemetry_block = read_telemetry
+        client.read_input_block = read_session
+        coordinator.controller = SuspendingController()
+        monkeypatch.setattr(
+            coordinator_module, "parse_telemetry", lambda _values: SimpleNamespace()
+        )
+        monkeypatch.setattr(coordinator_module, "apply_session", lambda *_args: None)
+
+        with pytest.raises(UpdateFailed, match="stopped during update"):
+            await coordinator._async_update_data()
+        return coordinator
+
+    coordinator = asyncio.run(exercise())
+    assert coordinator.ownership_state is OwnershipState.SUSPENDED
 
 
 def test_repeated_cycles_are_idempotent_and_capture_fresh_values():
@@ -359,13 +494,39 @@ def test_restore_failure_keeps_dirty_snapshot_and_retry_completes():
 def test_claim_logs_effective_safety_values(caplog):
     coordinator, _client, _events = _coordinator()
 
+    async def exercise() -> None:
+        await coordinator.async_activate()
+        await coordinator.async_claim_connection()
+
     with caplog.at_level(logging.INFO, logger="uec.coordinator"):
-        asyncio.run(coordinator.async_claim_connection())
+        asyncio.run(exercise())
 
     assert (
         "Claimed charger control: live limit=6 A, failsafe=6 A after 30 s"
         in caplog.text
     )
+
+
+def test_reconnect_claim_is_rejected_outside_owned_lifecycle():
+    coordinator, _client, _events = _coordinator()
+
+    with pytest.raises(WebastoModbusError, match="reconnect rejected"):
+        asyncio.run(coordinator.async_claim_connection())
+
+
+def test_reconnect_callback_direct_writes_run_under_lifecycle_lock():
+    coordinator, client, events = _coordinator()
+
+    class LockedReconnectController(FakeController):
+        async def async_on_reconnect(self, _phase_raw: int | None) -> None:
+            assert coordinator._ownership_lock.locked()
+            await coordinator.client.write_register(R.PHASE_SWITCH, 1)
+
+    coordinator.controller = LockedReconnectController()
+    asyncio.run(coordinator.async_activate())
+
+    assert ("write", R.PHASE_SWITCH.name, 1) in events
+    assert client.values[R.PHASE_SWITCH.name] == 1
 
 
 class FakeBus:

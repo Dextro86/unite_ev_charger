@@ -38,6 +38,7 @@ from .const import (
     CONF_UNIT_ID,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
+    HEARTBEAT_ALIVE_VALUE,
     CONTROL_EXTERNAL,
     DEFAULT_PORT,
     DEFAULT_POLL_INTERVAL,
@@ -374,7 +375,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                         original.failsafe_timeout,
                         original.phase_switch,
                     )
-                await self.async_claim_connection()
+                await self._async_claim_connection_locked()
             except WebastoModbusError:
                 if self.ownership_dirty:
                     await self._async_restore_locked(preserve_requested=True)
@@ -391,6 +392,16 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             return await self._async_restore_locked(
                 preserve_requested=preserve_requested
             )
+
+    async def async_write_owned(self, register: R.RegisterDef, value: int) -> None:
+        """Write only while this coordinator holds active EMS ownership."""
+        self._ensure_ownership_runtime()
+        async with self._ownership_lock:
+            if self.ownership_state is not OwnershipState.ACTIVE:
+                raise WebastoModbusError(
+                    "EMS ownership is not active; charger write rejected"
+                )
+            await self.client.write_register(register, value)
 
     async def _async_restore_locked(self, *, preserve_requested: bool) -> bool:
         if not preserve_requested and self.automatic_control_requested:
@@ -416,8 +427,8 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             registers.append((R.PHASE_SWITCH, original.phase_switch))
 
         try:
-            await write_heartbeat(self.client)
             for register, value in registers:
+                await write_heartbeat(self.client)
                 await self.client.write_register(register, value)
                 _LOGGER.info(
                     "Restored original register %s (%s) to %s",
@@ -426,6 +437,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                     value,
                 )
             for register, expected in registers:
+                await write_heartbeat(self.client)
                 actual = int(await self.client.read_register(register))
                 if actual != expected:
                     raise WebastoModbusError(
@@ -544,10 +556,14 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             # DLB with incomplete/stale inputs deliberately withholds Alive so
             # the wallbox watchdog also enforces its configured failsafe.
             if self.controller is None or self.controller.heartbeat_allowed:
-                await write_heartbeat(self.client)
+                await self.async_write_owned(R.ALIVE, HEARTBEAT_ALIVE_VALUE)
 
             return data
         except WebastoModbusError as err:
+            if not self.ownership_active:
+                raise UpdateFailed(
+                    "Automatic charger control stopped during update"
+                ) from err
             self._set_ownership_state(
                 OwnershipState.ERROR,
                 "Modbus communication failed while control was active",
@@ -568,6 +584,21 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
 
     async def async_claim_connection(self, phase_switch_raw: int | None = None) -> None:
         """Program safety state immediately after opening a Modbus connection."""
+        self._ensure_ownership_runtime()
+        async with self._ownership_lock:
+            if self.ownership_state not in (
+                OwnershipState.INITIALIZING,
+                OwnershipState.ACTIVE,
+            ):
+                raise WebastoModbusError(
+                    "EMS ownership is not active; reconnect rejected"
+                )
+            await self._async_claim_connection_locked(phase_switch_raw)
+
+    async def _async_claim_connection_locked(
+        self, phase_switch_raw: int | None = None
+    ) -> None:
+        """Claim a connection while caller holds the ownership lifecycle lock."""
         failsafe_current = normalize_failsafe_current(
             int(self.entry.options.get(CONF_FAILSAFE_CURRENT, DEFAULT_FAILSAFE_CURRENT_A))
         )
@@ -590,6 +621,8 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         )
         self.client.take_new_connection()
         if self.controller is not None:
+            # Reconnect callbacks may write directly: this entire callback runs
+            # under the lifecycle lock, so suspension cannot start concurrently.
             await self.controller.async_on_reconnect(phase_switch_raw)
 
     async def _read_telemetry_block(self) -> list[int]:

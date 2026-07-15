@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from uec.controller import ChargeControl
 from uec.models import WallboxData
+from uec.modbus import WebastoModbusError
 
 OPTIONS = {
     "default_mode": "solar",
@@ -38,6 +39,14 @@ class FakeCoordinator:
         self.client = client
         self.device = SimpleNamespace(max_current_a=16, min_current_a=6, phases_supported=3)
         self.data = None
+        self.ownership_active = True
+
+    async def async_write_owned(self, register, value: int) -> None:
+        if not self.ownership_active:
+            raise WebastoModbusError(
+                "EMS ownership is not active; charger write rejected"
+            )
+        await self.client.write_register(register, value)
 
     async def async_request_refresh(self) -> None:
         pass

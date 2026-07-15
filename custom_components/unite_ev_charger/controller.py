@@ -301,9 +301,9 @@ class ChargeControl:
             # Recovery owns the setpoint. Buffer a positive current (applied on
             # resume); a stop always goes through so evcc can always halt.
             if value == 0:
-                await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
+                await self.coordinator.async_write_owned(R.SET_CURRENT_A, 0)
             return
-        await self.coordinator.client.write_register(R.SET_CURRENT_A, value)
+        await self.coordinator.async_write_owned(R.SET_CURRENT_A, value)
         await self.coordinator.async_request_refresh()
 
     async def async_external_set_enabled(self, enabled: bool) -> None:
@@ -442,7 +442,7 @@ class ChargeControl:
             self._recovery_attempted = True   # at most one escalation per 3P request
             self._buffer_commands = True
             _LOGGER.info("phase recovery: still 1-phase, forcing a %ss pause at 0 A", dwell_s)
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
+            await self.coordinator.async_write_owned(R.SET_CURRENT_A, 0)
             if not await self._dwell(dwell_s):
                 _LOGGER.info("phase recovery: aborted (car disconnected during pause)")
                 self._set_recovery(RECOVERY_ABORTED)
@@ -516,7 +516,7 @@ class ChargeControl:
             value = max(0, min(ABS_MAX_CURRENT_A, int(value)))
             if value > 0:
                 self._ext_resume_current = value
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, value)
+            await self.coordinator.async_write_owned(R.SET_CURRENT_A, value)
         else:
             # Internal: let the control loop write the freshly computed setpoint
             # for the new (3-phase) config on the next cycle.
@@ -712,7 +712,7 @@ class ChargeControl:
     async def _write_phase(self, phases: int) -> None:
         value = 1 if phases == 3 else 0
         try:
-            await self.coordinator.client.write_register(R.PHASE_SWITCH, value)
+            await self.coordinator.async_write_owned(R.PHASE_SWITCH, value)
             _LOGGER.info("Switched charging to %s phase(s)", phases)
         except WebastoModbusError as err:
             _LOGGER.warning("Failed to switch to %s phase(s): %s", phases, err)
@@ -906,6 +906,6 @@ class ChargeControl:
             return
         if current_limit is None and setpoint == self._last_setpoint:
             return
-        await self.coordinator.client.write_register(R.SET_CURRENT_A, setpoint)
+        await self.coordinator.async_write_owned(R.SET_CURRENT_A, setpoint)
         self._last_setpoint = setpoint
         _LOGGER.debug("Wrote charge current setpoint: %s A", setpoint)

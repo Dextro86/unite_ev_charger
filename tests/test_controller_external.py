@@ -7,6 +7,9 @@ clamped only to the physical 0-32 A register range).
 from __future__ import annotations
 
 import asyncio
+import ast
+import inspect
+import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +35,13 @@ class FakeCoordinator:
         self.device = SimpleNamespace(max_current_a=16, min_current_a=6, phases_supported=3)
         self.data = None
         self.ownership_active = True
+
+    async def async_write_owned(self, register, value: int) -> None:
+        if not self.ownership_active:
+            raise WebastoModbusError(
+                "EMS ownership is not active; charger write rejected"
+            )
+        await self.client.write_register(register, value)
 
     async def async_request_refresh(self) -> None:
         pass
@@ -124,3 +134,25 @@ def test_external_writes_are_rejected_without_active_ownership():
         asyncio.run(ctl.async_external_set_phase(3))
 
     assert client.writes == []
+
+
+def test_controller_direct_writes_are_limited_to_locked_reconnect_helpers():
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ChargeControl)))
+    allowed = {
+        "_reassert_current_on_reconnect",
+        "_reassert_phase_on_reconnect",
+    }
+    unprotected: list[str] = []
+    for method in (
+        node for node in tree.body[0].body if isinstance(node, ast.AsyncFunctionDef)
+    ):
+        if method.name in allowed:
+            continue
+        for node in ast.walk(method):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "write_register"
+            ):
+                unprotected.append(method.name)
+    assert unprotected == []
