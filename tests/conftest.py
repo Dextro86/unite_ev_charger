@@ -25,6 +25,7 @@ sys.modules.setdefault("uec", _pkg)
 for _mod in (
     "homeassistant",
     "homeassistant.config_entries",
+    "homeassistant.const",
     "homeassistant.core",
     "homeassistant.exceptions",
     "homeassistant.helpers",
@@ -32,6 +33,7 @@ for _mod in (
 ):
     sys.modules.setdefault(_mod, types.ModuleType(_mod))
 sys.modules["homeassistant.config_entries"].ConfigEntry = object
+sys.modules["homeassistant.const"].EVENT_HOMEASSISTANT_STOP = "homeassistant_stop"
 sys.modules["homeassistant.core"].HomeAssistant = object
 
 

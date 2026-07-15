@@ -4,6 +4,7 @@ from __future__ import annotations
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -18,7 +19,41 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: WebastoCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([UniteChargingSwitch(coordinator)])
+    async_add_entities(
+        [
+            UniteAutomaticControlSwitch(coordinator),
+            UniteChargingSwitch(coordinator),
+        ]
+    )
+
+
+class UniteAutomaticControlSwitch(UniteEntity, SwitchEntity):
+    """Persistent EMS ownership switch."""
+
+    _attr_translation_key = "automatic_control"
+
+    def __init__(self, coordinator: WebastoCoordinator) -> None:
+        super().__init__(coordinator, "automatic_control")
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.automatic_control_requested
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self.coordinator.async_activate()
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        restored = await self.coordinator.async_suspend(preserve_requested=False)
+        if not restored:
+            raise HomeAssistantError(
+                "Automatic control is off, but charger restoration failed; "
+                "see integration logs"
+            )
 
 
 class UniteChargingSwitch(UniteEntity, SwitchEntity, RestoreEntity):

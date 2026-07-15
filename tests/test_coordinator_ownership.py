@@ -9,7 +9,6 @@ import pytest
 
 from uec import registers as R
 from uec.coordinator import WebastoCoordinator
-from uec import integration
 from uec.modbus import WebastoModbusError
 
 CONF_ORIGINAL_CURRENT_LIMIT = "original_current_limit"
@@ -130,88 +129,3 @@ def test_claim_logs_effective_safety_values(caplog):
         "Claimed charger control: live limit=6 A, failsafe=6 A after 30 s"
         in caplog.text
     )
-
-
-def test_setup_captures_original_before_claiming_connection(monkeypatch):
-    events: list[str] = []
-
-    class Client:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def async_close(self) -> None:
-            events.append("close")
-
-    class Coordinator:
-        def __init__(self, _hass, _entry, client) -> None:
-            self.client = client
-
-        async def async_capture_original_current_limit(self) -> None:
-            events.append("capture")
-
-        async def async_claim_connection(self) -> None:
-            events.append("claim")
-
-        async def async_read_device_info(self) -> None:
-            events.append("device_info")
-
-        async def async_config_entry_first_refresh(self) -> None:
-            events.append("refresh")
-
-    class Controller:
-        def __init__(self, _hass, _entry, _coordinator) -> None:
-            pass
-
-        async def async_on_reconnect(self, _phase) -> None:
-            events.append("controller")
-
-    class ConfigEntries:
-        async def async_forward_entry_setups(self, _entry, _platforms) -> None:
-            events.append("platforms")
-
-    hass = SimpleNamespace(config_entries=ConfigEntries(), data={})
-    entry = SimpleNamespace(
-        data={"host": "charger", "port": 502, "unit_id": 255},
-        async_on_unload=lambda _callback: None,
-        add_update_listener=lambda _callback: None,
-        entry_id="entry",
-    )
-    monkeypatch.setattr(integration, "WebastoModbus", Client)
-    monkeypatch.setattr(integration, "WebastoCoordinator", Coordinator)
-    monkeypatch.setattr(integration, "ChargeControl", Controller)
-
-    assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
-    assert events.index("capture") < events.index("claim")
-
-
-def test_unload_restores_original_before_closing_connection():
-    events: list[str] = []
-
-    class ConfigEntries:
-        async def async_unload_platforms(self, _entry, _platforms) -> bool:
-            return True
-
-    class Controller:
-        async def async_shutdown(self) -> None:
-            events.append("shutdown")
-
-    class Client:
-        async def async_close(self) -> None:
-            events.append("close")
-
-    class Coordinator:
-        controller = Controller()
-        client = Client()
-
-        async def async_restore_original_current_limit(self) -> bool:
-            events.append("restore")
-            return True
-
-    entry = SimpleNamespace(entry_id="entry")
-    hass = SimpleNamespace(
-        config_entries=ConfigEntries(),
-        data={"unite_ev_charger": {"entry": Coordinator()}},
-    )
-
-    assert asyncio.run(integration.async_unload_entry(hass, entry)) is True
-    assert events == ["shutdown", "restore", "close"]

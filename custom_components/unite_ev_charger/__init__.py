@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
@@ -31,41 +32,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unit_id=entry.data.get(CONF_UNIT_ID, DEFAULT_UNIT_ID),
     )
     coordinator = WebastoCoordinator(hass, entry, client)
+    coordinator.controller = ChargeControl(hass, entry, coordinator)
 
     try:
-        # Capture 5004 before the ownership handshake replaces it with the
-        # failsafe. Persist it once so reloads never redefine "original".
-        await coordinator.async_capture_original_current_limit()
-        await coordinator.async_claim_connection()
-        await coordinator.async_read_device_info()
+        if coordinator.automatic_control_requested:
+            await coordinator.async_activate()
+            await coordinator.async_read_device_info()
+            await coordinator.async_config_entry_first_refresh()
+        elif coordinator.ownership_dirty:
+            restored = await coordinator.async_suspend(preserve_requested=True)
+            if not restored:
+                raise WebastoModbusError(
+                    "Could not finish pending EMS ownership restoration"
+                )
     except WebastoModbusError as err:
-        await coordinator.async_restore_original_current_limit()
-        await client.async_close()
         raise ConfigEntryNotReady(f"Could not reach the charger: {err}") from err
-
-    coordinator.controller = ChargeControl(hass, entry, coordinator)
-    # Initial claim happens before the controller exists. Re-apply controller
-    # intent now; external mode starts at 0 A until its owner sends a command.
-    await coordinator.controller.async_on_reconnect(None)
-    await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_on_update))
+
+    async def _async_shutdown(_event) -> None:
+        restored = await coordinator.async_suspend(preserve_requested=True)
+        if not restored:
+            _LOGGER.critical(
+                "Home Assistant is stopping before charger configuration could "
+                "be restored; recovery snapshot retained"
+            )
+
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_shutdown)
+    )
     return True
 
 
 async def _async_reload_on_update(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is not None and not coordinator.configuration_changed(entry):
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    coordinator: WebastoCoordinator = hass.data[DOMAIN][entry.entry_id]
+    restored = await coordinator.async_suspend(preserve_requested=True)
+    if not restored:
+        _LOGGER.critical(
+            "Refusing to unload before charger configuration is restored"
+        )
+        return False
+
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
-        coordinator: WebastoCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
-        if coordinator.controller is not None:
-            await coordinator.controller.async_shutdown()
-        await coordinator.async_restore_original_current_limit()
-        await coordinator.client.async_close()
+        hass.data[DOMAIN].pop(entry.entry_id)
+    elif coordinator.automatic_control_requested:
+        try:
+            await coordinator.async_activate()
+        except WebastoModbusError as err:
+            _LOGGER.error("Could not resume control after unload failed: %s", err)
     return unloaded

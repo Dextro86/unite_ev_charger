@@ -24,6 +24,7 @@ from .const import (
     CONF_DLB_ENABLED,
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
+    CONF_HOST,
     CONF_ORIGINAL_FAILSAFE_CURRENT,
     CONF_ORIGINAL_FAILSAFE_TIMEOUT,
     CONF_ORIGINAL_CURRENT_LIMIT,
@@ -31,12 +32,16 @@ from .const import (
     CONF_OWNERSHIP_DIRTY,
     CONF_PHASE_SWITCHING,
     CONF_POLL_INTERVAL,
+    CONF_PORT,
     CONF_TELEMETRY_REGISTER_TYPE,
+    CONF_UNIT_ID,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
     CONTROL_EXTERNAL,
+    DEFAULT_PORT,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_TELEMETRY_REGISTER_TYPE,
+    DEFAULT_UNIT_ID,
     DOMAIN,
     TELEMETRY_REGISTER_AUTO,
     TELEMETRY_REGISTER_HOLDING,
@@ -98,6 +103,12 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             OwnershipState.ERROR
             if entry.data.get(CONF_OWNERSHIP_DIRTY)
             else OwnershipState.DISABLED
+        )
+        self._loaded_options = dict(entry.options)
+        self._loaded_connection = (
+            entry.data.get(CONF_HOST),
+            entry.data.get(CONF_PORT, DEFAULT_PORT),
+            entry.data.get(CONF_UNIT_ID, DEFAULT_UNIT_ID),
         )
         # monotonic deadline until which a web-UI reboot is considered in
         # progress (set by the restart button); drives the 'restarting' state.
@@ -217,6 +228,15 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         return bool(options.get(CONF_PHASE_SWITCHING, False)) or (
             options.get(CONF_CONTROL_MODE) == CONTROL_EXTERNAL
         )
+
+    def configuration_changed(self, entry: ConfigEntry) -> bool:
+        """Ignore ownership persistence; reload only user configuration changes."""
+        connection = (
+            entry.data.get(CONF_HOST),
+            entry.data.get(CONF_PORT, DEFAULT_PORT),
+            entry.data.get(CONF_UNIT_ID, DEFAULT_UNIT_ID),
+        )
+        return connection != self._loaded_connection or dict(entry.options) != self._loaded_options
 
     async def _async_capture_original_configuration(self) -> OriginalChargerConfig:
         """Read and durably persist one ownership-session baseline."""
@@ -455,6 +475,13 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         return True
 
     async def _async_update_data(self) -> WallboxData:
+        if not self.ownership_active:
+            if self.automatic_control_requested:
+                await self.async_activate()
+            elif self.ownership_dirty:
+                await self.async_suspend(preserve_requested=True)
+            if not self.ownership_active:
+                raise UpdateFailed("Automatic charger control is not active")
         try:
             # Claim a new connection before telemetry. This puts the charger at
             # the configured failsafe current before normal control can resume.
@@ -512,6 +539,10 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
 
             return data
         except WebastoModbusError as err:
+            self._set_ownership_state(
+                OwnershipState.ERROR,
+                "Modbus communication failed while control was active",
+            )
             raise UpdateFailed(str(err)) from err
 
     async def _on_new_connection(self, data: WallboxData) -> None:

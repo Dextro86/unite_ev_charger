@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from uec import registers as R
+from uec import integration
 from uec.coordinator import WebastoCoordinator
 from uec.modbus import WebastoModbusError
 
@@ -234,3 +235,145 @@ def test_restore_failure_keeps_dirty_snapshot_and_retry_completes():
     assert asyncio.run(coordinator.async_suspend(preserve_requested=False)) is True
     assert coordinator.entry.data["ownership_dirty"] is False
     assert _state(coordinator) == "suspended"
+
+
+class FakeBus:
+    def __init__(self) -> None:
+        self.callback = None
+
+    def async_listen_once(self, _event_type, callback):
+        self.callback = callback
+        return lambda: None
+
+
+def _integration_fakes(monkeypatch, *, requested: bool):
+    events: list[str] = []
+
+    class Client:
+        def __init__(self, **_kwargs) -> None:
+            self.connected = False
+
+        async def async_close(self) -> None:
+            events.append("old_close")
+
+    class Coordinator:
+        def __init__(self, _hass, entry, client) -> None:
+            self.entry = entry
+            self.client = client
+            self.controller = None
+
+        @property
+        def automatic_control_requested(self) -> bool:
+            return requested
+
+        @property
+        def ownership_dirty(self) -> bool:
+            return False
+
+        @property
+        def ownership_active(self) -> bool:
+            return requested
+
+        async def async_activate(self) -> None:
+            events.append("activate")
+
+        async def async_suspend(self, *, preserve_requested: bool) -> bool:
+            events.append(f"suspend:{preserve_requested}")
+            return True
+
+        async def async_capture_original_current_limit(self) -> None:
+            events.append("old_capture")
+
+        async def async_claim_connection(self) -> None:
+            events.append("old_claim")
+
+        async def async_restore_original_current_limit(self) -> bool:
+            events.append("old_restore")
+            return True
+
+        async def async_read_device_info(self) -> None:
+            events.append("device_info")
+
+        async def async_config_entry_first_refresh(self) -> None:
+            events.append("refresh")
+
+    class Controller:
+        def __init__(self, _hass, _entry, coordinator) -> None:
+            coordinator.controller = self
+            events.append("controller")
+
+        async def async_on_reconnect(self, _phase) -> None:
+            events.append("old_reconnect")
+
+        async def async_shutdown(self) -> None:
+            events.append("old_shutdown")
+
+    class ConfigEntries:
+        async def async_forward_entry_setups(self, _entry, _platforms) -> None:
+            events.append("platforms")
+
+        async def async_unload_platforms(self, _entry, _platforms) -> bool:
+            events.append("platforms_unload")
+            return True
+
+    bus = FakeBus()
+    hass = SimpleNamespace(config_entries=ConfigEntries(), data={}, bus=bus)
+    entry = SimpleNamespace(
+        data={
+            "host": "charger",
+            "port": 502,
+            "unit_id": 255,
+            "automatic_control": requested,
+        },
+        options={},
+        async_on_unload=lambda _callback: None,
+        add_update_listener=lambda _callback: None,
+        entry_id="entry",
+    )
+    monkeypatch.setattr(integration, "WebastoModbus", Client)
+    monkeypatch.setattr(integration, "WebastoCoordinator", Coordinator)
+    monkeypatch.setattr(integration, "ChargeControl", Controller)
+    return hass, entry, events, bus
+
+
+def test_setup_with_control_off_never_claims_or_polls(monkeypatch):
+    hass, entry, events, _bus = _integration_fakes(monkeypatch, requested=False)
+
+    assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
+
+    assert events == ["controller", "platforms"]
+
+
+def test_setup_with_control_on_activates_before_first_refresh(monkeypatch):
+    hass, entry, events, _bus = _integration_fakes(monkeypatch, requested=True)
+
+    assert asyncio.run(integration.async_setup_entry(hass, entry)) is True
+
+    assert events == [
+        "controller",
+        "activate",
+        "device_info",
+        "refresh",
+        "platforms",
+    ]
+
+
+def test_unload_suspends_before_platform_teardown(monkeypatch):
+    hass, entry, events, _bus = _integration_fakes(monkeypatch, requested=True)
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    events.clear()
+
+    assert asyncio.run(integration.async_unload_entry(hass, entry)) is True
+
+    assert events == ["suspend:True", "platforms_unload"]
+
+
+def test_shutdown_listener_suspends_with_requested_state_preserved(monkeypatch):
+    hass, entry, events, bus = _integration_fakes(monkeypatch, requested=True)
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    events.clear()
+
+    assert bus.callback is not None
+    asyncio.run(bus.callback(SimpleNamespace()))
+
+    assert events == ["suspend:True"]

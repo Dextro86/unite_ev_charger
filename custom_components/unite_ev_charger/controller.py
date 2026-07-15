@@ -277,6 +277,12 @@ class ChargeControl:
             cable_max=self.coordinator.device.max_current_a,
         )
 
+    def _require_active_ownership(self) -> None:
+        if getattr(self.coordinator, "ownership_active", True) is not True:
+            raise WebastoModbusError(
+                "EMS ownership is not active; charger write rejected"
+            )
+
     # -- external (evcc) direct writes --------------------------------------
     # Faithful passthrough: evcc owns phase/current/enable, each command is one
     # register write - like evcc's own Vestel driver. The only exception is the
@@ -284,6 +290,7 @@ class ChargeControl:
     # commands are buffered (a 0 A / stop still passes straight through) and the
     # entities report evcc's intent so evcc stays in sync.
     async def async_external_set_current(self, amps: float) -> None:
+        self._require_active_ownership()
         value = max(0, min(ABS_MAX_CURRENT_A, int(round(amps))))  # physical clamp only
         self._current_intent = value
         self._enabled_intent = value > 0
@@ -303,6 +310,7 @@ class ChargeControl:
         await self.async_external_set_current(self._ext_resume_current if enabled else 0)
 
     async def async_external_set_phase(self, phases: int) -> None:
+        self._require_active_ownership()
         if phases != 3:
             self._requested_phase = "1"
             self._recovery_attempted = False   # a 1P request re-arms recovery

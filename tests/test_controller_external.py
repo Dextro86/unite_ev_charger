@@ -9,8 +9,11 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from uec.controller import ChargeControl
 from uec.models import WallboxData
+from uec.modbus import WebastoModbusError
 
 EXT_OPTIONS = {"control_mode": "external", "min_current": 6, "max_current": 16}
 
@@ -28,6 +31,7 @@ class FakeCoordinator:
         self.client = client
         self.device = SimpleNamespace(max_current_a=16, min_current_a=6, phases_supported=3)
         self.data = None
+        self.ownership_active = True
 
     async def async_request_refresh(self) -> None:
         pass
@@ -108,3 +112,15 @@ def test_external_set_phase_is_a_faithful_passthrough():
 
     # Exactly one register write per command, straight through.
     assert asyncio.run(run()) == [("phase_switch", 1), ("phase_switch", 0)]
+
+
+def test_external_writes_are_rejected_without_active_ownership():
+    ctl, client = _ext_control()
+    ctl.coordinator.ownership_active = False
+
+    with pytest.raises(WebastoModbusError, match="EMS ownership is not active"):
+        asyncio.run(ctl.async_external_set_current(16))
+    with pytest.raises(WebastoModbusError, match="EMS ownership is not active"):
+        asyncio.run(ctl.async_external_set_phase(3))
+
+    assert client.writes == []
