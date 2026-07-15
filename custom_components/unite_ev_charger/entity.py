@@ -65,6 +65,11 @@ class UniteEntity(CoordinatorEntity[WebastoCoordinator]):
                 break
 
     @property
+    def available(self) -> bool:
+        """Entities backed by charger state require active EMS ownership."""
+        return super().available and self.coordinator.ownership_active
+
+    @property
     def device_info(self) -> HaDeviceInfo:
         dev = self.coordinator.device
         return HaDeviceInfo(

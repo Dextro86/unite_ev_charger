@@ -1,11 +1,9 @@
 """Config + options flow for Unite EV Charger.
 
-The setup step is deliberately minimal and bounded (just a connection test, so
-it cannot hang). All feature configuration lives in the options flow, which is
-menu-driven: you edit one section, return to the menu, edit another, and save
-once at the end. Power/current sensors are picked with filtered entity
-selectors, and we additionally reject energy sensors - the exact mistake that
-used to crash the old integration.
+The setup step deliberately performs no Modbus I/O: the ownership lifecycle
+must capture the charger's original configuration before any session can affect
+it. All feature configuration lives in the menu-driven options flow. Power and
+current sensors use filtered entity selectors, and energy sensors are rejected.
 """
 from __future__ import annotations
 
@@ -23,9 +21,9 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from . import registers as R
 from .const import (
     CHARGE_MODES,
+    CONF_AUTOMATIC_CONTROL,
     CONF_CONTROL_MODE,
     CONF_DEFAULT_MODE,
     CONF_DLB_CURRENT_L1,
@@ -33,6 +31,8 @@ from .const import (
     CONF_DLB_CURRENT_L3,
     CONF_DLB_ENABLED,
     CONF_DLB_MARGIN_A,
+    CONF_DLB_PHASES,
+    CONF_DLB_SENSOR_MAX_AGE,
     CONF_EXPORT_SENSOR,
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
@@ -40,6 +40,8 @@ from .const import (
     CONF_GRID_POWER_SENSOR,
     CONF_HOST,
     CONF_IMPORT_SENSOR,
+    CONF_INCREASE_DELAY,
+    CONF_INCREASE_STEP,
     CONF_MAIN_FUSE_A,
     CONF_MAX_CURRENT,
     CONF_METER_MODEL,
@@ -57,12 +59,17 @@ from .const import (
     CONF_REST_USERNAME,
     CONF_SOLAR_MIN_CURRENT,
     CONF_SURPLUS_SENSOR,
+    CONF_TELEMETRY_REGISTER_TYPE,
     CONF_UNIT_ID,
     CONTROL_MODES,
     DEFAULT_CONTROL_MODE,
     DEFAULT_DLB_MARGIN_A,
+    DEFAULT_DLB_PHASES,
+    DEFAULT_DLB_SENSOR_MAX_AGE_S,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
+    DEFAULT_INCREASE_DELAY_S,
+    DEFAULT_INCREASE_STEP_A,
     DEFAULT_MAIN_FUSE_A,
     DEFAULT_MAX_CURRENT_A,
     DEFAULT_MIN_CURRENT_A,
@@ -76,6 +83,7 @@ from .const import (
     DEFAULT_PORT,
     DEFAULT_REST_ENABLED,
     DEFAULT_REST_USERNAME,
+    DEFAULT_TELEMETRY_REGISTER_TYPE,
     DEFAULT_UNIT_ID,
     DOMAIN,
     MAX_POLL_INTERVAL,
@@ -85,8 +93,8 @@ from .const import (
     METER_SURPLUS,
     MIN_POLL_INTERVAL,
     NOMINAL_VOLTAGE,
+    TELEMETRY_REGISTER_TYPES,
 )
-from .modbus import WebastoModbus, WebastoModbusError
 from .rest_client import UniteRestAuthError, UniteRestError, async_build_rest_client
 from .units import ENERGY_UNITS
 
@@ -128,6 +136,16 @@ def _control_mode_selector() -> selector.SelectSelector:
     )
 
 
+def _telemetry_register_selector() -> selector.SelectSelector:
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=list(TELEMETRY_REGISTER_TYPES),
+            translation_key="telemetry_register_type",
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
 def _num(minv: float, maxv: float, step: float = 1, unit: str | None = None) -> selector.NumberSelector:
     """A clean number input box (with unit), instead of a slider."""
     return selector.NumberSelector(
@@ -144,36 +162,23 @@ def _num(minv: float, maxv: float, step: float = 1, unit: str | None = None) -> 
 class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
     """Initial connection setup."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
-
         if user_input is not None:
-            client = WebastoModbus(
-                host=user_input[CONF_HOST],
-                port=user_input[CONF_PORT],
-                unit_id=user_input[CONF_UNIT_ID],
+            unique = (
+                f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}:"
+                f"{user_input[CONF_UNIT_ID]}"
             )
-            serial: Any = None
-            try:
-                serial = await client.read_register(R.SERIAL_NUMBER)
-            except WebastoModbusError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001 - never let setup hang/crash
-                errors["base"] = "unknown"
-            finally:
-                await client.async_close()
-
-            if not errors:
-                serial_str = str(serial).strip() if serial else ""
-                unique = serial_str or f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}"
-                await self.async_set_unique_id(unique)
-                self._abort_if_unique_id_configured()
-                title = user_input.get(CONF_NAME) or "Unite EV Charger"
-                return self.async_create_entry(title=title, data=user_input)
+            await self.async_set_unique_id(unique)
+            self._abort_if_unique_id_configured()
+            title = user_input.get(CONF_NAME) or "Unite EV Charger"
+            return self.async_create_entry(
+                title=title,
+                data={**user_input, CONF_AUTOMATIC_CONTROL: False},
+            )
 
         schema = vol.Schema(
             {
@@ -184,34 +189,19 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
             }
         )
         data_schema = self.add_suggested_values_to_schema(schema, user_input or {})
-        return self.async_show_form(step_id="user", data_schema=data_schema, errors=errors)
+        return self.async_show_form(step_id="user", data_schema=data_schema)
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Change the connection (IP / port / unit id) of an existing charger."""
-        errors: dict[str, str] = {}
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
 
         if user_input is not None:
-            client = WebastoModbus(
-                host=user_input[CONF_HOST],
-                port=user_input[CONF_PORT],
-                unit_id=user_input[CONF_UNIT_ID],
+            return self.async_update_and_abort(
+                entry,
+                data_updates=user_input,
             )
-            try:
-                await client.read_register(R.SERIAL_NUMBER)
-            except WebastoModbusError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001
-                errors["base"] = "unknown"
-            finally:
-                await client.async_close()
-
-            if not errors:
-                return self.async_update_reload_and_abort(
-                    entry, data={**entry.data, **user_input}
-                )
 
         schema = vol.Schema(
             {
@@ -224,7 +214,6 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(schema, suggested),
-            errors=errors,
         )
 
     @staticmethod
@@ -244,14 +233,11 @@ class UniteOptionsFlow(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._entry = config_entry
         self.options: dict[str, Any] = dict(config_entry.options)
-        # Connection edits (host/port/unit) live in entry.data, not options, so
-        # they are staged here and applied once on save.
-        self._data_updates: dict[str, Any] = {}
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
-            menu_options=["connection", "charge", "meter", "dlb", "solar", "advanced", "reboot", "save"],
+            menu_options=["charge", "meter", "dlb", "solar", "advanced", "reboot", "save"],
         )
 
     async def async_step_reboot(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -289,45 +275,7 @@ class UniteOptionsFlow(OptionsFlow):
             errors=errors,
         )
 
-    async def async_step_connection(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Edit the connection (IP / port / unit id) from the settings menu."""
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            client = WebastoModbus(
-                host=user_input[CONF_HOST],
-                port=user_input[CONF_PORT],
-                unit_id=user_input[CONF_UNIT_ID],
-            )
-            try:
-                await client.read_register(R.SERIAL_NUMBER)
-            except WebastoModbusError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # noqa: BLE001 - never let the flow hang/crash
-                errors["base"] = "unknown"
-            finally:
-                await client.async_close()
-            if not errors:
-                self._data_updates.update(user_input)
-                return await self.async_step_init()
-        current = {**self._entry.data, **self._data_updates}
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_HOST): str,
-                vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
-                vol.Required(CONF_UNIT_ID, default=DEFAULT_UNIT_ID): int,
-            }
-        )
-        return self.async_show_form(
-            step_id="connection",
-            data_schema=self.add_suggested_values_to_schema(schema, current),
-            errors=errors,
-        )
-
     async def async_step_save(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if self._data_updates:
-            self.hass.config_entries.async_update_entry(
-                self._entry, data={**self._entry.data, **self._data_updates}
-            )
         return self.async_create_entry(title="", data=self.options)
 
     def _energy_error(self, *entity_ids: str | None) -> bool:
@@ -458,8 +406,14 @@ class UniteOptionsFlow(OptionsFlow):
     async def async_step_dlb(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            if user_input.get(CONF_DLB_ENABLED) and not user_input.get(CONF_DLB_CURRENT_L1):
-                errors["base"] = "dlb_needs_l1"
+            phases = int(user_input.get(CONF_DLB_PHASES, DEFAULT_DLB_PHASES))
+            required = [CONF_DLB_CURRENT_L1]
+            if phases == 3:
+                required += [CONF_DLB_CURRENT_L2, CONF_DLB_CURRENT_L3]
+            if user_input.get(CONF_DLB_ENABLED) and any(
+                not user_input.get(key) for key in required
+            ):
+                errors["base"] = "dlb_needs_all_phases"
             else:
                 self.options.update(user_input)
                 return await self.async_step_init()
@@ -468,6 +422,11 @@ class UniteOptionsFlow(OptionsFlow):
                 vol.Required(CONF_DLB_ENABLED, default=False): bool,
                 vol.Required(CONF_MAIN_FUSE_A, default=DEFAULT_MAIN_FUSE_A): _num(6, 125, 1, "A"),
                 vol.Required(CONF_DLB_MARGIN_A, default=DEFAULT_DLB_MARGIN_A): _num(0, 16, 1, "A"),
+                vol.Required(CONF_DLB_PHASES, default=DEFAULT_DLB_PHASES): vol.In([1, 3]),
+                vol.Required(
+                    CONF_DLB_SENSOR_MAX_AGE,
+                    default=DEFAULT_DLB_SENSOR_MAX_AGE_S,
+                ): _num(5, 300, 1, "s"),
                 vol.Optional(CONF_DLB_CURRENT_L1): _CURRENT_SENSOR,
                 vol.Optional(CONF_DLB_CURRENT_L2): _CURRENT_SENSOR,
                 vol.Optional(CONF_DLB_CURRENT_L3): _CURRENT_SENSOR,
@@ -497,9 +456,14 @@ class UniteOptionsFlow(OptionsFlow):
 
     # -- advanced -----------------------------------------------------------
     async def async_step_advanced(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self.options.update(user_input)
-            return await self.async_step_init()
+            failsafe = int(user_input[CONF_FAILSAFE_CURRENT])
+            if 0 < failsafe < 6:
+                errors["base"] = "invalid_failsafe_current"
+            else:
+                self.options.update(user_input)
+                return await self.async_step_init()
         schema = vol.Schema(
             {
                 vol.Required(CONF_POLL_INTERVAL, default=DEFAULT_POLL_INTERVAL): _num(
@@ -507,9 +471,20 @@ class UniteOptionsFlow(OptionsFlow):
                 ),
                 vol.Required(CONF_FAILSAFE_CURRENT, default=DEFAULT_FAILSAFE_CURRENT_A): _num(0, 32, 1, "A"),
                 vol.Required(CONF_FAILSAFE_TIMEOUT, default=DEFAULT_FAILSAFE_TIMEOUT_S): _num(10, 120, 1, "s"),
+                vol.Required(CONF_INCREASE_DELAY, default=DEFAULT_INCREASE_DELAY_S): _num(
+                    0, 120, 1, "s"
+                ),
+                vol.Required(CONF_INCREASE_STEP, default=DEFAULT_INCREASE_STEP_A): _num(
+                    1, 8, 1, "A"
+                ),
+                vol.Required(
+                    CONF_TELEMETRY_REGISTER_TYPE,
+                    default=DEFAULT_TELEMETRY_REGISTER_TYPE,
+                ): _telemetry_register_selector(),
             }
         )
         return self.async_show_form(
             step_id="advanced",
             data_schema=self.add_suggested_values_to_schema(schema, self.options),
+            errors=errors,
         )

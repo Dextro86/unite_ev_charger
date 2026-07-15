@@ -29,9 +29,14 @@ from .const import (
     CONF_DLB_CURRENT_L3,
     CONF_DLB_ENABLED,
     CONF_DLB_MARGIN_A,
+    CONF_DLB_PHASES,
+    CONF_DLB_SENSOR_MAX_AGE,
     CONF_EXPORT_SENSOR,
     CONF_GRID_EXPORT_NEGATIVE,
     CONF_GRID_POWER_SENSOR,
+    CONF_FAILSAFE_CURRENT,
+    CONF_INCREASE_DELAY,
+    CONF_INCREASE_STEP,
     CONF_IMPORT_SENSOR,
     CONF_MAIN_FUSE_A,
     CONF_MAX_CURRENT,
@@ -49,6 +54,11 @@ from .const import (
     CONTROL_EXTERNAL,
     DEFAULT_CONTROL_MODE,
     DEFAULT_DLB_MARGIN_A,
+    DEFAULT_DLB_PHASES,
+    DEFAULT_DLB_SENSOR_MAX_AGE_S,
+    DEFAULT_FAILSAFE_CURRENT_A,
+    DEFAULT_INCREASE_DELAY_S,
+    DEFAULT_INCREASE_STEP_A,
     DEFAULT_MAIN_FUSE_A,
     DEFAULT_MAX_CURRENT_A,
     DEFAULT_MIN_CURRENT_A,
@@ -59,6 +69,7 @@ from .const import (
     DEFAULT_PHASE_SWITCH_DWELL_S,
     DEFAULT_PHASE_PREFERENCE,
     DEFAULT_PHASE_SWITCHING,
+    DLB_CURRENT_PLAUSIBLE_FLOOR_A,
     METER_DSMR,
     METER_NONE,
     METER_SIGNED_GRID,
@@ -107,6 +118,8 @@ class ControlConfig:
     dlb_enabled: bool
     main_fuse_a: int
     dlb_margin_a: int
+    dlb_phases: int
+    dlb_sensor_max_age: int
     dlb_l1: str | None
     dlb_l2: str | None
     dlb_l3: str | None
@@ -115,6 +128,9 @@ class ControlConfig:
     phase_recovery_enabled: bool
     phase_recovery_observe: int
     phase_recovery_dwell: int
+    failsafe_current: int
+    increase_delay: int
+    increase_step: int
 
     @classmethod
     def from_entry(cls, entry: ConfigEntry) -> "ControlConfig":
@@ -136,6 +152,10 @@ class ControlConfig:
             dlb_enabled=bool(o.get(CONF_DLB_ENABLED, False)),
             main_fuse_a=int(o.get(CONF_MAIN_FUSE_A, DEFAULT_MAIN_FUSE_A)),
             dlb_margin_a=int(o.get(CONF_DLB_MARGIN_A, DEFAULT_DLB_MARGIN_A)),
+            dlb_phases=int(o.get(CONF_DLB_PHASES, DEFAULT_DLB_PHASES)),
+            dlb_sensor_max_age=int(
+                o.get(CONF_DLB_SENSOR_MAX_AGE, DEFAULT_DLB_SENSOR_MAX_AGE_S)
+            ),
             dlb_l1=o.get(CONF_DLB_CURRENT_L1),
             dlb_l2=o.get(CONF_DLB_CURRENT_L2),
             dlb_l3=o.get(CONF_DLB_CURRENT_L3),
@@ -150,6 +170,11 @@ class ControlConfig:
             phase_recovery_dwell=int(
                 o.get(CONF_PHASE_RECOVERY_DWELL, DEFAULT_PHASE_RECOVERY_DWELL_S)
             ),
+            failsafe_current=ctrl.normalize_failsafe_current(
+                int(o.get(CONF_FAILSAFE_CURRENT, DEFAULT_FAILSAFE_CURRENT_A))
+            ),
+            increase_delay=int(o.get(CONF_INCREASE_DELAY, DEFAULT_INCREASE_DELAY_S)),
+            increase_step=int(o.get(CONF_INCREASE_STEP, DEFAULT_INCREASE_STEP_A)),
         )
 
 
@@ -170,10 +195,15 @@ class ChargeControl:
         # Exposed for sensors/diagnostics.
         self.computed_setpoint: int | None = None
         self.available_surplus_w: float | None = None
+        self.dlb_healthy: bool | None = None
+        self.dlb_failure_reason: str | None = None
 
         # Internal state.
         self._surplus_window: deque[tuple[float, float]] = deque()
         self._last_setpoint: int | None = None
+        self._started_at = datetime.now(timezone.utc)
+        self._increase_since: float | None = None
+        self._heartbeat_allowed = not self.cfg.dlb_enabled
         self._was_connected: bool = False
         self._charge_started: float | None = None
         # Phase-switch timers.
@@ -187,6 +217,7 @@ class ChargeControl:
         self._recovery_status: str = RECOVERY_IDLE
         self._recovery_remaining_s: int = 0
         self._recovery_attempted: bool = False   # latch: one escalation per 3P request
+        self._recovery_abort_requested: bool = False
         self._buffer_commands: bool = False       # hold evcc's writes during the pause
         self._last_recovery_at: datetime | None = None
         self._last_recovery_result: str | None = None
@@ -204,6 +235,11 @@ class ChargeControl:
     @property
     def recovery_active(self) -> bool:
         return self._recovery_task is not None and not self._recovery_task.done()
+
+    @property
+    def heartbeat_allowed(self) -> bool:
+        """Whether current control has a trustworthy input snapshot."""
+        return self._heartbeat_allowed
 
     @property
     def recovery_status(self) -> str:
@@ -242,6 +278,12 @@ class ChargeControl:
             cable_max=self.coordinator.device.max_current_a,
         )
 
+    def _require_active_ownership(self) -> None:
+        if getattr(self.coordinator, "ownership_active", True) is not True:
+            raise WebastoModbusError(
+                "EMS ownership is not active; charger write rejected"
+            )
+
     # -- external (evcc) direct writes --------------------------------------
     # Faithful passthrough: evcc owns phase/current/enable, each command is one
     # register write - like evcc's own Vestel driver. The only exception is the
@@ -249,6 +291,7 @@ class ChargeControl:
     # commands are buffered (a 0 A / stop still passes straight through) and the
     # entities report evcc's intent so evcc stays in sync.
     async def async_external_set_current(self, amps: float) -> None:
+        self._require_active_ownership()
         value = max(0, min(ABS_MAX_CURRENT_A, int(round(amps))))  # physical clamp only
         self._current_intent = value
         self._enabled_intent = value > 0
@@ -259,15 +302,16 @@ class ChargeControl:
             # Recovery owns the setpoint. Buffer a positive current (applied on
             # resume); a stop always goes through so evcc can always halt.
             if value == 0:
-                await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
+                await self.coordinator.async_write_owned(R.SET_CURRENT_A, 0)
             return
-        await self.coordinator.client.write_register(R.SET_CURRENT_A, value)
+        await self.coordinator.async_write_owned(R.SET_CURRENT_A, value)
         await self.coordinator.async_request_refresh()
 
     async def async_external_set_enabled(self, enabled: bool) -> None:
         await self.async_external_set_current(self._ext_resume_current if enabled else 0)
 
     async def async_external_set_phase(self, phases: int) -> None:
+        self._require_active_ownership()
         if phases != 3:
             self._requested_phase = "1"
             self._recovery_attempted = False   # a 1P request re-arms recovery
@@ -315,11 +359,16 @@ class ChargeControl:
     def _start_recovery(self) -> None:
         if self.recovery_active:
             return
-        self._recovery_task = asyncio.create_task(self._recovery_sequence())
+        self._recovery_abort_requested = False
+        self._recovery_task = self.hass.async_create_task(
+            self._recovery_sequence(), name="unite_ev_charger phase recovery"
+        )
 
     def _cancel_recovery(self) -> None:
+        self._recovery_abort_requested = True
         if self._recovery_task is not None and not self._recovery_task.done():
-            self._recovery_task.cancel()
+            if self._recovery_task is not asyncio.current_task():
+                self._recovery_task.cancel()
         self._buffer_commands = False
 
     def _set_recovery(self, status: str, remaining_s: int = 0) -> None:
@@ -330,9 +379,9 @@ class ChargeControl:
     async def async_on_reconnect(self, phase_raw: int | None) -> None:
         """Re-assert charging current AND phase after a fresh Modbus connection.
 
-        Per the Vestel spec the wallbox resets register 405 (phase) to its 404
-        default *and* its charging-current register on every Modbus disconnection,
-        so we restore both instead of silently running on the wallbox defaults.
+        The protocol requires fresh connection programming but does not prove
+        readable values or register 405 reset. Reassert saved intent defensively
+        so observed reconnect behavior cannot silently change current or phase.
         """
         await self._reassert_current_on_reconnect()
         await self._reassert_phase_on_reconnect(phase_raw)
@@ -357,19 +406,18 @@ class ChargeControl:
             self._last_setpoint = None
 
     async def _reassert_phase_on_reconnect(self, phase_raw: int | None) -> None:
-        """Restore the desired phase: the wallbox reset register 405 to its 404
-        default on the disconnect (per spec).
+        """Restore desired phase when reconnect exposes a different live value.
 
         Internal mode's control loop re-evaluates the phase this same cycle, so
         only the external (evcc) path needs an explicit re-assert - and only when
-        the reset default actually differs from evcc's request, to avoid a
-        needless CP interruption.
+        the observed value differs from evcc's request, avoiding needless CP
+        interruption.
         """
         if not self.is_external or self._requested_phase not in (PHASE_1P, PHASE_3P):
             return
         desired_raw = 1 if self._requested_phase == PHASE_3P else 0
         if phase_raw == desired_raw:
-            return  # reset default already matches -> no write, no CP blip
+            return  # observed value already matches -> no write, no CP blip
         await self.coordinator.client.write_register(R.PHASE_SWITCH, desired_raw)
 
     async def async_shutdown(self) -> None:
@@ -399,7 +447,7 @@ class ChargeControl:
             self._recovery_attempted = True   # at most one escalation per 3P request
             self._buffer_commands = True
             _LOGGER.info("phase recovery: still 1-phase, forcing a %ss pause at 0 A", dwell_s)
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
+            await self.coordinator.async_write_owned(R.SET_CURRENT_A, 0)
             if not await self._dwell(dwell_s):
                 _LOGGER.info("phase recovery: aborted (car disconnected during pause)")
                 self._set_recovery(RECOVERY_ABORTED)
@@ -425,13 +473,24 @@ class ChargeControl:
             self._buffer_commands = False
             self._recovery_remaining_s = 0
             self.coordinator.async_update_listeners()
-            await self.coordinator.async_request_refresh()
+            task = asyncio.current_task()
+            cancellation_in_progress = (
+                self._recovery_abort_requested
+                or (task is not None and task.cancelling())
+            )
+            if (
+                not cancellation_in_progress
+                and getattr(self.coordinator, "ownership_active", True)
+            ):
+                await self.coordinator.async_request_refresh()
 
     async def _observe_phase(self, observe_s: int) -> str | None:
         """Return a terminal status if we should stop, or None to escalate."""
         deadline = monotonic() + observe_s
         while True:
             self._set_recovery(RECOVERY_OBSERVING, int(ceil(deadline - monotonic())))
+            if self._recovery_abort_requested:
+                return RECOVERY_ABORTED
             data = self.coordinator.data
             if data is None or not data.vehicle_connected:
                 return RECOVERY_ABORTED
@@ -441,6 +500,8 @@ class ChargeControl:
                 break
             await asyncio.sleep(2)
             await self.coordinator.async_request_refresh()
+            if self._recovery_abort_requested:
+                return RECOVERY_ABORTED
         data = self.coordinator.data
         if data is None or not data.vehicle_connected:
             return RECOVERY_ABORTED
@@ -456,6 +517,8 @@ class ChargeControl:
         while monotonic() < deadline:
             self._set_recovery(RECOVERY_DWELLING, int(ceil(deadline - monotonic())))
             await asyncio.sleep(1)
+            if self._recovery_abort_requested:
+                return False
             data = self.coordinator.data
             if data is not None and not data.vehicle_connected:
                 return False
@@ -473,7 +536,7 @@ class ChargeControl:
             value = max(0, min(ABS_MAX_CURRENT_A, int(value)))
             if value > 0:
                 self._ext_resume_current = value
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, value)
+            await self.coordinator.async_write_owned(R.SET_CURRENT_A, value)
         else:
             # Internal: let the control loop write the freshly computed setpoint
             # for the new (3-phase) config on the next cycle.
@@ -481,6 +544,9 @@ class ChargeControl:
 
     # -- the per-cycle entry point ------------------------------------------
     async def async_apply(self, data: WallboxData) -> None:
+        # Fail closed until this cycle proves every required DLB input healthy.
+        # External control does not use this integration's DLB loop.
+        self._heartbeat_allowed = not self.cfg.dlb_enabled or self.is_external
         connected = data.vehicle_connected
         just_disconnected = self._was_connected and not connected
         self._was_connected = connected
@@ -492,6 +558,17 @@ class ChargeControl:
         # the coordinator, so the wallbox does not drop to its failsafe.
         if self.is_external:
             return
+
+        dlb_cap = None
+        if self.cfg.dlb_enabled:
+            dlb_cap, dlb_error = self._dlb_cap(data)
+            if dlb_error is not None:
+                self._cancel_recovery()
+                await self._apply_dlb_failsafe(data, dlb_error)
+                return
+            self._set_dlb_health(True, None)
+            self._heartbeat_allowed = True
+
         # A recovery owns the charger while it runs; keep the control loop out.
         if self.recovery_active:
             return
@@ -523,19 +600,33 @@ class ChargeControl:
             voltage=voltage,
             limits=limits,
         )
-        dlb_cap = self._dlb_cap(data)
-        setpoint = ctrl.finalize_a(
+        if not self.cfg.dlb_enabled:
+            self._set_dlb_health(None, None)
+        self._heartbeat_allowed = True
+
+        # Solar anti-short-cycle may hold its minimum through a cloud transient,
+        # but it must run before DLB so grid protection always wins last.
+        mode_setpoint = ctrl.finalize_a(
             target,
-            dlb_cap=dlb_cap,
+            dlb_cap=None,
             limits=limits,
             charging_enabled=self.charging_enabled,
             vehicle_connected=connected,
         )
         if self.mode in SOLAR_MODES:
-            setpoint = self._anti_short_cycle(setpoint, limits)
+            mode_setpoint = self._anti_short_cycle(mode_setpoint, limits)
+
+        safe_target = ctrl.finalize_a(
+            mode_setpoint,
+            dlb_cap=dlb_cap,
+            limits=limits,
+            charging_enabled=self.charging_enabled,
+            vehicle_connected=connected,
+        )
+        setpoint = self._limit_increase(safe_target, data.set_current_a, limits)
 
         self.computed_setpoint = setpoint
-        await self._write_setpoint(setpoint)
+        await self._write_setpoint(setpoint, current_limit=data.set_current_a)
 
     # -- internals -----------------------------------------------------------
     def _active_phases(self, data: WallboxData) -> int:
@@ -647,7 +738,7 @@ class ChargeControl:
     async def _write_phase(self, phases: int) -> None:
         value = 1 if phases == 3 else 0
         try:
-            await self.coordinator.client.write_register(R.PHASE_SWITCH, value)
+            await self.coordinator.async_write_owned(R.PHASE_SWITCH, value)
             _LOGGER.info("Switched charging to %s phase(s)", phases)
         except WebastoModbusError as err:
             _LOGGER.warning("Failed to switch to %s phase(s): %s", phases, err)
@@ -677,28 +768,85 @@ class ChargeControl:
             return ctrl.available_surplus_w(export, data.active_power_w), True
         return 0.0, False
 
-    def _dlb_cap(self, data: WallboxData) -> float | None:
+    def _dlb_cap(self, data: WallboxData) -> tuple[float | None, str | None]:
         if not self.cfg.dlb_enabled:
-            return None
+            return None, None
         pairs = (
             (self.cfg.dlb_l1, data.current_l1_a),
             (self.cfg.dlb_l2, data.current_l2_a),
             (self.cfg.dlb_l3, data.current_l3_a),
         )
+        required = pairs[:1] if self.cfg.dlb_phases == 1 else pairs
         grid_a: list[float] = []
         charger_a: list[float] = []
-        for sensor_id, charger_current in pairs:
+        plausible_max = max(
+            DLB_CURRENT_PLAUSIBLE_FLOOR_A,
+            self.cfg.main_fuse_a * 2.0,
+        )
+        for phase, (sensor_id, charger_current) in enumerate(required, start=1):
             if not sensor_id:
-                continue
-            amps = read_current_a(self.hass, sensor_id)
+                return None, f"L{phase} grid-current sensor is not configured"
+            amps = read_current_a(
+                self.hass,
+                sensor_id,
+                max_age_s=self.cfg.dlb_sensor_max_age,
+                not_before=self._started_at,
+            )
             if amps is None:
-                continue
+                return None, f"L{phase} grid-current sensor is unavailable or stale"
+            if not ctrl.plausible_current(amps, plausible_max):
+                _LOGGER.debug("DLB L%s grid current is implausible: %r A", phase, amps)
+                return None, f"L{phase} grid current is implausible"
+            if not ctrl.plausible_current(charger_current, ABS_MAX_CURRENT_A * 2.0):
+                _LOGGER.debug(
+                    "DLB L%s charger current is implausible: %r A",
+                    phase,
+                    charger_current,
+                )
+                return None, f"L{phase} charger current is implausible"
             grid_a.append(amps)
             charger_a.append(charger_current)
-        if not grid_a:
-            _LOGGER.debug("DLB enabled but no usable grid current sensor; not capping")
-            return None
-        return ctrl.dlb_cap_a(self.cfg.main_fuse_a, self.cfg.dlb_margin_a, grid_a, charger_a)
+        cap = ctrl.dlb_cap_a(
+            self.cfg.main_fuse_a,
+            self.cfg.dlb_margin_a,
+            grid_a,
+            charger_a,
+        )
+        _LOGGER.debug(
+            "DLB calculation: grid=%s A charger=%s A fuse=%s A margin=%s A cap=%.2f A",
+            grid_a,
+            charger_a,
+            self.cfg.main_fuse_a,
+            self.cfg.dlb_margin_a,
+            cap,
+        )
+        return cap, None
+
+    def _set_dlb_health(self, healthy: bool | None, reason: str | None) -> None:
+        previous = self.dlb_healthy
+        previous_reason = self.dlb_failure_reason
+        self.dlb_healthy = healthy
+        self.dlb_failure_reason = reason
+        if healthy is False and (previous is not False or previous_reason != reason):
+            _LOGGER.warning(
+                "DLB paused: %s; applying 0 A stop and withholding Alive",
+                reason,
+            )
+        elif healthy is True and previous is False:
+            _LOGGER.info(
+                "DLB input recovered; normal control and Alive heartbeat resumed"
+            )
+
+    async def _apply_dlb_failsafe(self, data: WallboxData, reason: str) -> None:
+        self._set_dlb_health(False, reason)
+        self._heartbeat_allowed = False
+        self._increase_since = None
+        self.computed_setpoint = 0
+        await self._write_setpoint(
+            0,
+            current_limit=data.set_current_a,
+            bypass_quiet=True,
+        )
 
     def _smooth(self, surplus_w: float) -> float:
         now = monotonic()
@@ -727,18 +875,61 @@ class ChargeControl:
         self._charge_started = None
         return 0
 
-    async def _write_setpoint(self, setpoint: int) -> None:
+    def _limit_increase(
+        self,
+        target: int,
+        current_limit: int | None,
+        limits: ctrl.Limits,
+    ) -> int:
+        """Apply immediate reductions and delayed, stepped increases."""
+        current = current_limit
+        if current is None:
+            current = self._last_setpoint
+        if current is None:
+            current = max(0, min(ABS_MAX_CURRENT_A, self.cfg.failsafe_current))
+
+        if target <= current:
+            self._increase_since = None
+            return target
+
+        now = monotonic()
+        if self._increase_since is None:
+            self._increase_since = now
+            if self.cfg.increase_delay > 0:
+                return current
+        if now - self._increase_since < self.cfg.increase_delay:
+            return current
+
+        self._increase_since = now
+        if current < limits.min_current:
+            return min(target, limits.min_current)
+        return min(target, current + self.cfg.increase_step)
+
+    async def _write_setpoint(
+        self,
+        setpoint: int,
+        *,
+        current_limit: int | None = None,
+        bypass_quiet: bool = False,
+    ) -> None:
         # Quiet period right after a phase switch: leave the current setpoint
-        # alone so the wallbox can finish its internal CP interruption. The
-        # heartbeat (written by the coordinator) keeps going regardless.
-        if self._last_switch is not None and monotonic() - self._last_switch < PHASE_SWITCH_QUIET_S:
+        # alone so the wallbox can finish its internal CP interruption. Safety
+        # reductions and failsafe writes always bypass this delay.
+        previous = current_limit if current_limit is not None else self._last_setpoint
+        reducing = previous is not None and setpoint < previous
+        if (
+            not bypass_quiet
+            and not reducing
+            and self._last_switch is not None
+            and monotonic() - self._last_switch < PHASE_SWITCH_QUIET_S
+        ):
             _LOGGER.debug("Holding charge-current write during post-phase-switch quiet period")
             return
-        if setpoint == self._last_setpoint:
-            return
-        try:
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, setpoint)
+        if current_limit is not None and setpoint == current_limit:
             self._last_setpoint = setpoint
-            _LOGGER.debug("Wrote charge current setpoint: %s A", setpoint)
-        except WebastoModbusError as err:
-            _LOGGER.warning("Failed to write charge current setpoint %s A: %s", setpoint, err)
+            return
+        if current_limit is None and setpoint == self._last_setpoint:
+            return
+        await self.coordinator.async_write_owned(R.SET_CURRENT_A, setpoint)
+        self._last_setpoint = setpoint
+        _LOGGER.debug("Wrote charge current setpoint: %s A", setpoint)

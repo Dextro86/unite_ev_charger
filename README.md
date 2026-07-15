@@ -29,7 +29,10 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
   - **Solar** — charge from PV surplus only; pauses when there is too little sun.
   - **Minimum plus Solar** — always at least a minimum, follow surplus above it
     (keeps charging at the minimum if the sensor is briefly unavailable).
-- **Charging toggle** — a master on/off switch (default on).
+- **Automatic charger control** — explicitly claims or releases Modbus EMS
+  ownership. Releasing it restores the pre-control charger configuration.
+- **Charging toggle** — allows or pauses charging while automatic control owns
+  the charger.
 - **Default mode** — each new session starts in your configured default
   (reverts when the car is unplugged, evcc-style).
 - **Dynamic Load Balancing (DLB)** — caps charging per phase so you never exceed
@@ -60,6 +63,11 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
 
 ## Installation
 
+HACS is optional. For this `0.2.0-dev.3` commissioning build, install the
+`codex/dlb-safety-hardening` branch manually: download that branch, copy
+`custom_components/unite_ev_charger` into Home Assistant's
+`config/custom_components/` directory, and restart Home Assistant.
+
 ### HACS
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Dextro86&repository=unite_ev_charger&category=integration)
@@ -73,26 +81,62 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
 Copy `custom_components/unite_ev_charger` into your Home Assistant
 `config/custom_components/` directory and restart.
 
+## EV-unplugged commissioning
+
+This fork build is ready only for an **EV-unplugged commissioning run**. Live
+charging remains blocked until restoration evidence from the user's Unite
+matches exactly.
+
+1. Keep the vehicle unplugged for the entire commissioning run.
+2. Add the integration. Verify **Automatic charger control** stays **OFF** and
+   that no Modbus TCP session opens.
+3. Return the charger to the desired autonomous configuration.
+4. Enable **Automatic charger control** once. Record every value from the
+   `Captured original charger configuration` log: registers `5004`, `2000`,
+   `2002`, and `405` (when owned).
+5. Exercise each release path: disable control, enable then disable it a second
+   time, enable then restart Home Assistant, and finally unload the integration
+   once after Home Assistant returns.
+6. After every release, compare the `Verified original register` log values for
+   `5004`, `2000`, `2002`, and `405` with the captured originals. If checking
+   independently, connect only after the integration has closed its Modbus
+   session.
+7. Do not test live charging unless every restore matches exactly after every
+   release.
+
+TCP first-connect passivity has not yet been proven on physical hardware. An
+unreachable or powered-off charger cannot be restored by software; the ownership
+journal remains dirty so manual recovery evidence is not lost.
+
 ## Setup
 
 1. *Settings → Devices & Services → Add Integration → Unite EV Charger*.
 2. Enter a name and the charger's IP address (port and unit id are pre-filled).
 
-That gets you monitoring and Fast/Manual control. Solar, DLB, evcc and the restart
-button are configured afterwards via **Configure**.
+Automatic charger control is off by default. Charger-backed entities and
+monitoring remain unavailable until **Automatic charger control** is enabled.
+Solar, DLB, evcc and the restart button are configured afterwards via
+**Configure**.
+
+Upgrading an existing entry from a version that did not save the original
+failsafe registers disables automatic control once and raises a Home Assistant
+repair issue. Return the charger to a known autonomous configuration, then turn
+on **Automatic charger control** to capture a trustworthy baseline. The
+integration never assumes missing original values.
 
 ## Configuration (Configure → Settings)
 
 The options are a menu — edit a section, return, and **Save & close** once.
+Change charger IP, port, or unit id through the config entry's
+**Reconfigure** flow.
 
 | Screen | What you set |
 |---|---|
-| **Connection** | Charger IP, port, Modbus unit id |
 | **Charging** | Charging control (built-in / external evcc), default mode, min/max current, enable phase switching, optional 1→3 phase recovery |
 | **Power meter** | How you measure grid/solar power — HomeWizard P1 (signed), DSMR (import+export), a ready-made surplus sensor, or none. Shared by Solar and DLB. |
-| **Dynamic Load Balancing** | Enable, main fuse (A), safety margin, per-phase grid current sensors (L1 required; L2/L3 for a 3-phase connection) |
+| **Dynamic Load Balancing** | Enable, grid phase count, main fuse (A), safety margin, maximum sensor age, and one grid-current sensor per phase |
 | **Solar** | Minimum solar current, automatic phase-switch dwell |
-| **Advanced** | Polling interval, failsafe current & timeout |
+| **Advanced** | Polling interval, failsafe current & timeout, increase delay/step, telemetry register type |
 | **Restart (web UI)** | Enable the web-UI login (username/password) to expose the Restart button |
 
 > **Power vs energy:** the meter screens only accept **power** sensors (W/kW).
@@ -107,6 +151,33 @@ uses the charger's measured voltage (falling back to a configurable nominal).
 On each phase the room for the car is `fuse − margin − (grid current − charger
 current)`; the cap is the lowest across the phases the car charges on. This is the
 same approach evcc uses.
+
+DLB is fail-closed. Every configured grid phase must have a finite, plausible,
+fresh current reading received after this integration started. If any required
+reading is missing, stale or invalid, the integration immediately applies the
+safe live setpoint `0 A` and withholds the Alive heartbeat. The configured
+communication failsafe remains programmed in the wallbox, but invalid DLB input
+never commands that potentially positive value as the live current limit.
+Normal control resumes only after a complete fresh snapshot is available.
+Every automatic-control strategy requires working failsafe registers `2000` and
+`2002`; setup/reconnect fails closed if the charger rejects that handshake.
+
+Choose **1 phase** only for a genuinely single-phase grid connection. A 3-phase
+connection requires L1, L2 and L3. Signed readings are preserved: negative export
+creates headroom on that phase and is never converted to an absolute value.
+
+Reductions are immediate, including during the post-phase-switch quiet period.
+Increases wait for the configured stable-headroom delay and then advance by at
+most the configured step each cycle. Solar anti-short-cycle behavior never
+overrides a DLB reduction or stop.
+
+### Telemetry register type
+
+Unite firmware variants expose the `1000..1037` telemetry block through input
+registers (FC4), holding registers (FC3), or both. **Auto-detect** tries input
+registers first and falls back to holding registers after a Modbus exception.
+Select the explicit type under **Advanced** if unsupported reads return zeros
+instead of an exception. Control registers remain holding registers.
 
 ## Phase switching
 
@@ -132,30 +203,63 @@ diagnostic sensors show the recovery state and remaining time.
 > **soft reset** of the charger, which you can trigger from the
 > [Restart button](#restart-button-web-ui).
 
-Note: register `405` resets to its `404` default on **every** Modbus disconnect
-(see below), so the integration re-asserts the desired phase after each reconnect.
+Reconnects can expose a phase value different from control intent, so the
+integration conservatively re-asserts the desired phase when needed.
 
 ## Modbus ownership, failsafe & reconnect
 
-The Vestel firmware expects the master to *own* the connection, and the
-integration follows that contract:
+Fast, Manual, Solar and evcc are current-control strategies. DLB is a separate
+per-phase safety ceiling; turning DLB off does not release charger ownership.
+The **Automatic charger control** switch is the ownership boundary.
 
-- **Failsafe** — on every new connection it writes the failsafe current + timeout,
-  then an **alive** heartbeat each cycle. If the heartbeat lapses past the timeout,
-  the wallbox drops to its failsafe current and **closes the socket** itself.
+When automatic control turns on, the integration first reads registers `5004`
+(current limit), `2000` (failsafe current), `2002` (failsafe timeout), and `405`
+when phase control can change it. It saves them to an atomic Home Assistant
+ownership journal. Only after that complete snapshot is durable does it
+configure EMS control and start the heartbeat.
+
+When automatic control turns off, or the entry unloads, reloads, is removed, or
+Home Assistant shuts down, the integration keeps Alive running while it restores
+those values in order, reads them back, then stops Alive and closes Modbus.
+Failed restoration retains the snapshot, reports an error, and retries; it is
+never reported as a successful release.
+
+If entry deletion cannot restore a dirty ownership journal, its orphaned Home
+Assistant Store file is retained as manual recovery evidence. Re-adding the
+charger creates a different entry id and does not find or consume that orphan.
+
+The remaining connection contract is:
+
+- **Required connection programming** — Vestel requires the master to set
+  failsafe current, failsafe timeout, charging current, and Alive immediately
+  after each new connection. The integration sends Alive only while control
+  inputs are healthy; after the timeout, the wallbox uses its failsafe current.
 - **Heartbeat cadence** — the alive register must be refreshed faster than
   `failsafe_timeout / 2`, so the effective poll interval is clamped to
   `min(poll, max(3 s, timeout/2))`, whatever you configure.
-- **Register 405 resets on disconnect** — per the spec, the phase register returns
-  to its `404` default on any TCP disconnect, power cycle or reset. After each
-  reconnect the integration re-asserts the intended phase (and the charging
-  current), so a brief drop never silently changes your phase.
+- **Defensive reconnect reassertion** — the official protocol does not prove
+  readable pre-connect values reset, and does not prove register `405` resets.
+  Reconnect behavior still warrants conservatively re-asserting intended phase
+  and charging current when ownership resumes.
 - **Reconnect handshake** — a power-cycled or still-booting wallbox is picked up
   automatically: on the next successful poll the integration re-claims ownership
   (failsafe + charging current + phase + alive).
+- **Per-session originals** — after a verified release the snapshot is cleared.
+  A later activation captures fresh autonomous values, so changes made while
+  suspended are preserved. A restart during active control reuses the dirty
+  snapshot and never recaptures integration-modified values as originals.
+- **Suspended means autonomous** — Modbus is closed and charger-backed entities
+  are unavailable. Passive reads are not attempted because a Unite Modbus
+  TCP first connection cannot yet be proven not to affect EMS state.
 - **Robust 404 read** — the phase-capability register is re-read every cycle (a
   Unite can report it wrong while booting), so a single bad read never disables
   phase switching for the session.
+
+If the charger is powered off or unreachable, software cannot restore its
+registers. The integration retains the recovery snapshot, logs every original
+value, and refuses to claim a clean release. After a sudden Home Assistant crash,
+the wallbox hardware watchdog remains the immediate protection; automatic
+control resumes from the persisted snapshot when Home Assistant returns.
 
 ## Restart button (web UI)
 

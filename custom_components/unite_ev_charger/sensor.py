@@ -156,7 +156,7 @@ SENSORS: tuple[UniteSensorDescription, ...] = (
         value_fn=lambda d: d.iec61851_status,
     ),
     # Raw phase capability register 404 (0 = 1-phase, 1 = 3-phase), re-read every
-    # cycle. This is also the default register 405 resets to on a disconnection.
+    # cycle because firmware can report it incorrectly while booting.
     UniteSensorDescription(
         key="register_404",
         translation_key="register_404",

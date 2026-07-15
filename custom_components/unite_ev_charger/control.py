@@ -9,6 +9,7 @@ HA-aware controller; this module only does the math.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 from .const import (
     MODE_FAST,
@@ -87,12 +88,9 @@ class Limits:
 def effective_poll_interval(poll_interval: int, failsafe_timeout: int) -> int:
     """Clamp the poll interval so the Alive heartbeat is refreshed fast enough.
 
-    The Unite drops the Modbus socket (and resets register 405 to its default)
-    if it does not see an Alive refresh within the failsafe timeout; the spec
-    recommends refreshing every ``timeout/2`` (floor 3 s). We write the heartbeat
-    once per poll, so the poll must never be slower than that - otherwise a slow
-    poll causes spurious failsafe + phase resets. The user's configured value is
-    kept; this only makes the effective tick faster when needed.
+    Vestel requires Alive after connection and within the failsafe timeout. We
+    refresh every ``timeout/2`` (floor 3 s). The user's configured value is kept;
+    this only makes the effective tick faster when needed.
     """
     return min(poll_interval, max(3, failsafe_timeout // 2))
 
@@ -180,6 +178,18 @@ def dlb_cap_a(
     """
     caps = [fuse - margin - (g - c) for g, c in zip(grid_a, charger_a)]
     return min(caps) if caps else float("inf")
+
+
+def plausible_current(value: float, max_abs: float) -> bool:
+    """Return whether a signed current is finite and physically plausible."""
+    return isfinite(value) and abs(value) <= max_abs
+
+
+def normalize_failsafe_current(value: int, min_current: int = 6, max_current: int = 32) -> int:
+    """Clamp a failsafe to 0 (pause) or the charger's valid current range."""
+    if value <= 0:
+        return 0
+    return max(min_current, min(max_current, value))
 
 
 def desired_phases(

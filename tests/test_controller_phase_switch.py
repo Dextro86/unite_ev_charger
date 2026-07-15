@@ -11,9 +11,9 @@ from dataclasses import replace
 from time import monotonic
 from types import SimpleNamespace
 
-from uec import registers as R
 from uec.controller import ChargeControl
 from uec.models import WallboxData
+from uec.modbus import WebastoModbusError
 
 OPTIONS = {
     "default_mode": "solar",
@@ -39,6 +39,14 @@ class FakeCoordinator:
         self.client = client
         self.device = SimpleNamespace(max_current_a=16, min_current_a=6, phases_supported=3)
         self.data = None
+        self.ownership_active = True
+
+    async def async_write_owned(self, register, value: int) -> None:
+        if not self.ownership_active:
+            raise WebastoModbusError(
+                "EMS ownership is not active; charger write rejected"
+            )
+        await self.client.write_register(register, value)
 
     async def async_request_refresh(self) -> None:
         pass
@@ -206,3 +214,12 @@ def test_setpoint_held_during_quiet_then_resumes():
     held, after = asyncio.run(run())
     assert held == []                          # no 5004 write during quiet period
     assert ("set_current_a", 10) in after      # resumes after the quiet period
+
+
+def test_reduction_bypasses_post_switch_quiet_period():
+    ctl, client = _make_control()
+    ctl._last_switch = monotonic()
+
+    asyncio.run(ctl._write_setpoint(6, current_limit=16))
+
+    assert client.writes == [("set_current_a", 6)]

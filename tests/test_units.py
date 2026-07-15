@@ -33,3 +33,9 @@ def test_current_normalisation():
     assert units.parse_current_a("16000", "mA") == 16.0
     assert units.parse_current_a("unavailable", "A") is None
     assert units.parse_current_a("16", "W") is None  # wrong quantity
+
+
+def test_non_finite_numbers_are_rejected():
+    assert units.parse_current_a("nan", "A") is None
+    assert units.parse_current_a("inf", "A") is None
+    assert units.parse_power_w("-inf", "W") is None

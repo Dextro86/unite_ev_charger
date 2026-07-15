@@ -18,7 +18,7 @@ if str(TOOLS) not in sys.path:
 import unite_simulator as sim  # noqa: E402
 
 from uec import registers as R  # noqa: E402
-from uec.models import apply_session, parse_telemetry  # noqa: E402
+from uec.models import parse_telemetry  # noqa: E402
 from uec.modbus import WebastoModbus  # noqa: E402
 from uec.registers import ChargePointState  # noqa: E402
 

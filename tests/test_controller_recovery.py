@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import uec.controller as controller_module
 from uec.controller import ChargeControl
 from uec.models import WallboxData
+from uec.modbus import WebastoModbusError
 
 # Neutralise the hardcoded settle sleep so the full-sequence test is instant.
 controller_module.PHASE_RECOVERY_SETTLE_S = 0
@@ -26,11 +27,29 @@ class FakeClient:
         self.writes.append((reg.name, value))
 
 
+class FakeHass:
+    def __init__(self) -> None:
+        self.created_tasks: list[tuple[asyncio.Task, str | None]] = []
+
+    def async_create_task(self, coro, name=None):
+        task = asyncio.create_task(coro, name=name)
+        self.created_tasks.append((task, name))
+        return task
+
+
 class FakeCoordinator:
     def __init__(self, client: FakeClient) -> None:
         self.client = client
         self.device = SimpleNamespace(max_current_a=16, min_current_a=6, phases_supported=3)
         self.data = None
+        self.ownership_active = True
+
+    async def async_write_owned(self, register, value: int) -> None:
+        if not self.ownership_active:
+            raise WebastoModbusError(
+                "EMS ownership is not active; charger write rejected"
+            )
+        await self.client.write_register(register, value)
 
     async def async_request_refresh(self) -> None:
         pass
@@ -51,7 +70,8 @@ def _control(**overrides):
     opts.update(overrides)
     client = FakeClient()
     coord = FakeCoordinator(client)
-    ctl = ChargeControl(object(), SimpleNamespace(options=opts), coord)
+    hass = FakeHass()
+    ctl = ChargeControl(hass, SimpleNamespace(options=opts), coord)
     return ctl, client, coord
 
 
@@ -120,6 +140,61 @@ def test_phase3_while_charging_1p_starts_recovery():
     assert writes == [("phase_switch", 1)]  # live 405=3 written immediately
     assert active is True
     assert status == "observing_3p"
+
+
+def test_recovery_uses_home_assistant_tracked_task_creation():
+    ctl, _client, coord = _control(
+        phase_recovery_observe=30, phase_recovery_dwell=30
+    )
+    coord.data = _charging_1p()
+
+    async def run():
+        await ctl.async_external_set_phase(3)
+        await asyncio.sleep(0)
+        created = list(ctl.hass.created_tasks)
+        await ctl.async_shutdown()
+        return created
+
+    created = asyncio.run(run())
+    assert len(created) == 1
+    assert created[0][0] is not None
+    assert created[0][1] == "unite_ev_charger phase recovery"
+
+
+def test_suspension_cancels_recovery_without_refresh_lock_reentry():
+    ctl, client, coord = _control(
+        phase_recovery_observe=30, phase_recovery_dwell=30
+    )
+    coord.data = _charging_1p()
+    coord._lock = asyncio.Lock()
+    coord.refreshes = 0
+
+    async def write_owned(register, value):
+        async with coord._lock:
+            if not coord.ownership_active:
+                raise WebastoModbusError("EMS ownership is not active")
+            await client.write_register(register, value)
+
+    async def immediate_refresh():
+        coord.refreshes += 1
+        await write_owned(controller_module.R.SET_CURRENT_A, 16)
+
+    async def suspend():
+        async with coord._lock:
+            coord.ownership_active = False
+            await ctl.async_shutdown()
+
+    coord.async_write_owned = write_owned
+    coord.async_request_refresh = immediate_refresh
+
+    async def run():
+        ctl._start_recovery()
+        await asyncio.sleep(0)
+        await asyncio.wait_for(suspend(), timeout=0.25)
+
+    asyncio.run(run())
+    assert coord.refreshes == 0
+    assert client.writes == []
 
 
 def test_buffering_holds_positive_current_but_lets_zero_through():
@@ -206,31 +281,30 @@ def test_on_reconnect_internal_invalidates_setpoint_cache():
     assert client.writes == []          # handshake itself writes nothing internally
 
 
-def test_on_reconnect_reasserts_evcc_phase_after_405_reset():
-    """The wallbox resets 405 to its 404 default on disconnect; evcc's requested
-    phase must be restored (evcc's own select shows intent, so it won't self-fix)."""
+def test_on_reconnect_reasserts_evcc_phase_when_live_value_differs():
+    """Reconnect reasserts evcc intent when observed register 405 differs."""
     ctl, client, _ = _control()  # external
 
     async def run():
         await ctl.async_external_set_phase(3)  # evcc requested 3-phase
         client.writes.clear()
-        await ctl.async_on_reconnect(0)  # wallbox reset to default 1-phase (raw 0)
+        await ctl.async_on_reconnect(0)  # observed live value is 1-phase (raw 0)
         return list(client.writes)
 
     # current restored (0, no intent yet) + phase re-asserted to 3-phase (405=1)
     assert asyncio.run(run()) == [("set_current_a", 0), ("phase_switch", 1)]
 
 
-def test_on_reconnect_skips_phase_write_when_default_matches():
+def test_on_reconnect_skips_phase_write_when_live_value_matches():
     ctl, client, _ = _control()  # external
 
     async def run():
         await ctl.async_external_set_phase(3)  # wants 3-phase
         client.writes.clear()
-        await ctl.async_on_reconnect(1)  # wallbox default already 3-phase (raw 1)
+        await ctl.async_on_reconnect(1)  # observed live value is 3-phase (raw 1)
         return [w for w in client.writes if w[0] == "phase_switch"]
 
-    assert asyncio.run(run()) == []  # no CP blip when the reset default matches
+    assert asyncio.run(run()) == []  # no CP blip when live value matches
 
 
 def test_on_reconnect_internal_does_not_write_phase():

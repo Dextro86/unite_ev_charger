@@ -133,6 +133,13 @@ def test_dlb_cap_takes_lowest_phase_and_margin():
     assert C.dlb_cap_a(25, 2, [20.0, 12.0], [5.0, 5.0]) == 8.0
 
 
+def test_failsafe_current_never_uses_invalid_one_to_five_amp_range():
+    assert C.normalize_failsafe_current(0) == 0
+    assert C.normalize_failsafe_current(3) == 6
+    assert C.normalize_failsafe_current(6) == 6
+    assert C.normalize_failsafe_current(99) == 32
+
+
 # --- finalize ---------------------------------------------------------------
 def test_finalize_pauses_when_disabled_or_no_vehicle():
     assert C.finalize_a(16, dlb_cap=None, limits=LIMITS,

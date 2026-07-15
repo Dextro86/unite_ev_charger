@@ -11,7 +11,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from . import control as ctrl
-from .const import CONF_HOST, CONF_REST_PASSWORD, CONF_REST_USERNAME, DOMAIN
+from .const import (
+    CONF_BASELINE_REQUIRED,
+    CONF_HOST,
+    CONF_REST_PASSWORD,
+    CONF_REST_USERNAME,
+    DOMAIN,
+)
 from .coordinator import WebastoCoordinator
 
 # Never leak the wallbox address, serial, or the web-UI credentials in a
@@ -29,6 +35,7 @@ async def async_get_config_entry_diagnostics(
     coordinator: WebastoCoordinator = hass.data[DOMAIN][entry.entry_id]
     controller = coordinator.controller
     data = coordinator.data
+    original = coordinator.original_configuration
 
     out: dict[str, Any] = {
         "entry": {
@@ -37,6 +44,15 @@ async def async_get_config_entry_diagnostics(
         },
         "device": async_redact_data(asdict(coordinator.device), TO_REDACT),
         "modbus_stats": asdict(coordinator.client.stats),
+        "telemetry_register_type": coordinator.telemetry_register_type,
+        "failsafe_configured": coordinator.failsafe_configured,
+        "ownership": {
+            "state": coordinator.ownership_state.value,
+            "requested": coordinator.automatic_control_requested,
+            "dirty": coordinator.ownership_dirty,
+            "baseline_required": bool(entry.data.get(CONF_BASELINE_REQUIRED)),
+            "original": asdict(original) if original is not None else None,
+        },
         "wallbox": asdict(data) if data is not None else None,
         "last_update_success": coordinator.last_update_success,
         "rest": {
@@ -52,6 +68,9 @@ async def async_get_config_entry_diagnostics(
             "manual_current": controller.manual_current,
             "computed_setpoint": controller.computed_setpoint,
             "available_surplus_w": controller.available_surplus_w,
+            "dlb_healthy": controller.dlb_healthy,
+            "dlb_failure_reason": controller.dlb_failure_reason,
+            "heartbeat_allowed": controller.heartbeat_allowed,
             "recovery_status": controller.recovery_status,
             "recovery_active": controller.recovery_active,
             "recovery_remaining_s": controller.recovery_remaining_s,
