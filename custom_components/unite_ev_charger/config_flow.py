@@ -198,8 +198,9 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
 
         if user_input is not None:
-            return self.async_update_reload_and_abort(
-                entry, data={**entry.data, **user_input}
+            return self.async_update_and_abort(
+                entry,
+                data_updates=user_input,
             )
 
         schema = vol.Schema(

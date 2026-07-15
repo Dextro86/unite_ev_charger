@@ -1,6 +1,7 @@
 """The Unite EV Charger integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.config_entries import ConfigEntry
@@ -82,20 +83,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise WebastoModbusError(
                     "Could not finish pending EMS ownership restoration"
                 )
-    except WebastoModbusError as err:
-        raise ConfigEntryNotReady(f"Could not reach the charger: {err}") from err
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+        if entry.data.get(CONF_BASELINE_REQUIRED):
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                f"{ISSUE_LEGACY_BASELINE_REQUIRED}_{entry.entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_LEGACY_BASELINE_REQUIRED,
+            )
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except (Exception, asyncio.CancelledError) as err:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        if coordinator.ownership_dirty:
+            try:
+                restored = await coordinator.async_suspend(preserve_requested=True)
+            except (Exception, asyncio.CancelledError):
+                _LOGGER.critical(
+                    "Setup failed and charger restoration also failed; "
+                    "ownership journal retained",
+                    exc_info=True,
+                )
+            else:
+                if not restored:
+                    _LOGGER.critical(
+                        "Setup failed and charger restoration also failed; "
+                        "ownership journal retained"
+                    )
+        if isinstance(err, WebastoModbusError):
+            raise ConfigEntryNotReady(f"Could not reach the charger: {err}") from err
+        raise
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    if entry.data.get(CONF_BASELINE_REQUIRED):
-        ir.async_create_issue(
-            hass,
-            DOMAIN,
-            f"{ISSUE_LEGACY_BASELINE_REQUIRED}_{entry.entry_id}",
-            is_fixable=False,
-            severity=ir.IssueSeverity.WARNING,
-            translation_key=ISSUE_LEGACY_BASELINE_REQUIRED,
-        )
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_on_update))
 
     async def _async_shutdown(_event) -> None:
@@ -138,3 +157,48 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except WebastoModbusError as err:
             _LOGGER.error("Could not resume control after unload failed: %s", err)
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove only recovery data proven clean before config-entry deletion."""
+    domain_data = hass.data.get(DOMAIN, {})
+    coordinator: WebastoCoordinator | None = domain_data.pop(entry.entry_id, None)
+    retained = coordinator is not None
+    if coordinator is None:
+        client = WebastoModbus(
+            host=entry.data[CONF_HOST],
+            port=entry.data.get(CONF_PORT, DEFAULT_PORT),
+            unit_id=entry.data.get(CONF_UNIT_ID, DEFAULT_UNIT_ID),
+        )
+        coordinator = WebastoCoordinator(hass, entry, client)
+
+    if coordinator.ownership_dirty:
+        if not retained:
+            _LOGGER.critical(
+                "Config entry removed with a dirty EMS ownership journal; "
+                "manual charger recovery required and journal retained"
+            )
+            return
+        try:
+            restored = await coordinator.async_suspend(preserve_requested=True)
+        except asyncio.CancelledError:
+            _LOGGER.critical(
+                "Removal cancelled before charger restoration; manual charger "
+                "recovery required and journal retained"
+            )
+            raise
+        except Exception:
+            _LOGGER.critical(
+                "Charger restoration raised during removal; manual charger "
+                "recovery required and journal retained",
+                exc_info=True,
+            )
+            return
+        if not restored:
+            _LOGGER.critical(
+                "Charger restoration failed during removal; manual charger "
+                "recovery required and journal retained"
+            )
+            return
+
+    await coordinator.async_remove_clean_ownership_record()

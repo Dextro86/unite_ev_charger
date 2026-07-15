@@ -256,6 +256,12 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             else OwnershipState.DISABLED
         )
 
+    async def async_remove_clean_ownership_record(self) -> None:
+        """Delete the durable journal only after verified restoration."""
+        if self.ownership_dirty:
+            raise WebastoModbusError("Cannot remove a dirty EMS ownership journal")
+        await self._ownership_store.async_remove()
+
     async def _persist_ownership_data(
         self,
         updates: dict[str, object],

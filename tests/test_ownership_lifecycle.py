@@ -37,6 +37,10 @@ class FakeStore:
         self.loaded = dict(data)
         self.events.append(("durable", dict(data)))
 
+    async def async_remove(self) -> None:
+        self.loaded = None
+        self.events.append(("remove_journal",))
+
 
 class FakeClient:
     def __init__(self, values: dict[str, int], events: list[tuple]) -> None:
@@ -149,6 +153,17 @@ def integration_config_flow():
 
         def async_create_entry(self, *, title, data):
             return {"title": title, "data": data}
+
+        def async_update_and_abort(self, entry, *, data_updates):
+            self.hass.config_entries.async_update_entry(
+                entry, data={**entry.data, **data_updates}
+            )
+            return {"type": "abort", "reason": "reconfigure_successful"}
+
+        def async_update_reload_and_abort(self, entry, *, data):
+            self.hass.config_entries.async_update_entry(entry, data=data)
+            self.hass.config_entries.reloads.append(entry.entry_id)
+            return {"type": "abort", "reason": "reconfigure_successful"}
 
     config_entries.ConfigFlow = ConfigFlow
     config_entries.ConfigFlowResult = dict
@@ -491,6 +506,33 @@ def test_restore_failure_keeps_dirty_snapshot_and_retry_completes():
     assert _state(coordinator) == "suspended"
 
 
+def test_clean_ownership_record_can_be_removed():
+    coordinator, _client, events = _coordinator(
+        data={"automatic_control": False, "ownership_dirty": False}
+    )
+
+    asyncio.run(coordinator.async_remove_clean_ownership_record())
+
+    assert events == [("remove_journal",)]
+
+
+def test_dirty_ownership_record_cannot_be_removed():
+    coordinator, _client, events = _coordinator(
+        data={
+            "automatic_control": True,
+            "ownership_dirty": True,
+            "original_current_limit": 20,
+            "original_failsafe_current": 12,
+            "original_failsafe_timeout": 45,
+        }
+    )
+
+    with pytest.raises(WebastoModbusError, match="dirty EMS ownership journal"):
+        asyncio.run(coordinator.async_remove_clean_ownership_record())
+
+    assert ("remove_journal",) not in events
+
+
 def test_claim_logs_effective_safety_values(caplog):
     coordinator, _client, _events = _coordinator()
 
@@ -538,7 +580,14 @@ class FakeBus:
         return lambda: None
 
 
-def _integration_fakes(monkeypatch, *, requested: bool):
+def _integration_fakes(
+    monkeypatch,
+    *,
+    requested: bool,
+    fail_at: str | None = None,
+    restore_success: bool = True,
+    restore_error: bool = False,
+):
     events: list[str] = []
 
     class Client:
@@ -553,6 +602,7 @@ def _integration_fakes(monkeypatch, *, requested: bool):
             self.entry = entry
             self.client = client
             self.controller = None
+            self._ownership_dirty = bool(entry.data.get("ownership_dirty", False))
 
         async def async_load_ownership_record(self) -> None:
             events.append("load")
@@ -563,7 +613,7 @@ def _integration_fakes(monkeypatch, *, requested: bool):
 
         @property
         def ownership_dirty(self) -> bool:
-            return False
+            return self._ownership_dirty
 
         @property
         def ownership_active(self) -> bool:
@@ -571,16 +621,32 @@ def _integration_fakes(monkeypatch, *, requested: bool):
 
         async def async_activate(self) -> None:
             events.append("activate")
+            self._ownership_dirty = True
+            self.entry.data["ownership_dirty"] = True
 
         async def async_suspend(self, *, preserve_requested: bool) -> bool:
             events.append(f"suspend:{preserve_requested}")
-            return True
+            if restore_error:
+                raise WebastoModbusError("rollback exploded")
+            if restore_success:
+                self._ownership_dirty = False
+                self.entry.data["ownership_dirty"] = False
+            return restore_success
+
+        async def async_remove_clean_ownership_record(self) -> None:
+            if self._ownership_dirty:
+                raise WebastoModbusError("Cannot remove a dirty EMS ownership journal")
+            events.append("remove_journal")
 
         async def async_read_device_info(self) -> None:
             events.append("device_info")
 
         async def async_config_entry_first_refresh(self) -> None:
             events.append("refresh")
+            if fail_at == "refresh":
+                raise RuntimeError("refresh")
+            if fail_at == "cancel":
+                raise asyncio.CancelledError
 
     class Controller:
         def __init__(self, _hass, _entry, coordinator) -> None:
@@ -596,6 +662,8 @@ def _integration_fakes(monkeypatch, *, requested: bool):
     class ConfigEntries:
         async def async_forward_entry_setups(self, _entry, _platforms) -> None:
             events.append("platforms")
+            if fail_at == "platforms":
+                raise RuntimeError("platforms")
 
         async def async_unload_platforms(self, _entry, _platforms) -> bool:
             events.append("platforms_unload")
@@ -603,6 +671,7 @@ def _integration_fakes(monkeypatch, *, requested: bool):
 
     bus = FakeBus()
     hass = SimpleNamespace(config_entries=ConfigEntries(), data={}, bus=bus)
+    unload_callbacks = []
     entry = SimpleNamespace(
         data={
             "host": "charger",
@@ -611,9 +680,10 @@ def _integration_fakes(monkeypatch, *, requested: bool):
             "automatic_control": requested,
         },
         options={},
-        async_on_unload=lambda _callback: None,
+        async_on_unload=unload_callbacks.append,
         add_update_listener=lambda _callback: None,
         entry_id="entry",
+        unload_callbacks=unload_callbacks,
     )
     monkeypatch.setattr(integration, "WebastoModbus", Client)
     monkeypatch.setattr(integration, "WebastoCoordinator", Coordinator)
@@ -644,6 +714,57 @@ def test_setup_with_control_on_activates_before_first_refresh(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("failure", ["refresh", "platforms"])
+def test_setup_failure_after_activation_restores(monkeypatch, failure):
+    hass, entry, events, _bus = _integration_fakes(
+        monkeypatch, requested=True, fail_at=failure
+    )
+
+    with pytest.raises(RuntimeError, match=failure):
+        asyncio.run(integration.async_setup_entry(hass, entry))
+
+    assert "activate" in events
+    assert "suspend:True" in events
+    assert events.index("suspend:True") > events.index("activate")
+    assert entry.data["ownership_dirty"] is False
+    assert entry.entry_id not in hass.data.get("unite_ev_charger", {})
+    assert entry.unload_callbacks == []
+
+
+def test_setup_cancellation_restores_before_propagating(monkeypatch):
+    hass, entry, events, _bus = _integration_fakes(
+        monkeypatch, requested=True, fail_at="cancel"
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(integration.async_setup_entry(hass, entry))
+
+    assert events[-1] == "suspend:True"
+    assert entry.data["ownership_dirty"] is False
+
+
+@pytest.mark.parametrize("restore_error", [False, True])
+def test_setup_failure_retains_dirty_journal_when_rollback_fails(
+    monkeypatch, caplog, restore_error
+):
+    hass, entry, events, _bus = _integration_fakes(
+        monkeypatch,
+        requested=True,
+        fail_at="platforms",
+        restore_success=False,
+        restore_error=restore_error,
+    )
+
+    with caplog.at_level(logging.CRITICAL, logger="uec.integration"):
+        with pytest.raises(RuntimeError, match="platforms"):
+            asyncio.run(integration.async_setup_entry(hass, entry))
+
+    assert events[-1] == "suspend:True"
+    assert entry.data["ownership_dirty"] is True
+    assert entry.entry_id not in hass.data.get("unite_ev_charger", {})
+    assert "ownership journal retained" in caplog.text
+
+
 def test_unload_suspends_before_platform_teardown(monkeypatch):
     hass, entry, events, _bus = _integration_fakes(monkeypatch, requested=True)
     asyncio.run(integration.async_setup_entry(hass, entry))
@@ -652,6 +773,109 @@ def test_unload_suspends_before_platform_teardown(monkeypatch):
     assert asyncio.run(integration.async_unload_entry(hass, entry)) is True
 
     assert events == ["suspend:True", "platforms_unload"]
+
+
+def test_remove_retries_retained_coordinator_before_deleting_journal(monkeypatch):
+    hass, entry, events, _bus = _integration_fakes(monkeypatch, requested=True)
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    events.clear()
+
+    asyncio.run(integration.async_remove_entry(hass, entry))
+
+    assert events == ["suspend:True", "remove_journal"]
+    assert entry.data["ownership_dirty"] is False
+
+
+@pytest.mark.parametrize("restore_error", [False, True])
+def test_remove_failure_retains_dirty_journal(
+    monkeypatch, caplog, restore_error
+):
+    hass, entry, events, _bus = _integration_fakes(
+        monkeypatch,
+        requested=True,
+        restore_success=False,
+        restore_error=restore_error,
+    )
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    events.clear()
+
+    with caplog.at_level(logging.CRITICAL, logger="uec.integration"):
+        asyncio.run(integration.async_remove_entry(hass, entry))
+
+    assert events == ["suspend:True"]
+    assert entry.data["ownership_dirty"] is True
+    assert "manual charger recovery required" in caplog.text
+
+
+def test_remove_after_clean_unload_deletes_journal_without_reconnecting(monkeypatch):
+    hass, entry, events, _bus = _integration_fakes(monkeypatch, requested=True)
+    asyncio.run(integration.async_setup_entry(hass, entry))
+    assert asyncio.run(integration.async_unload_entry(hass, entry)) is True
+    events.clear()
+
+    asyncio.run(integration.async_remove_entry(hass, entry))
+
+    assert events == ["remove_journal"]
+
+
+def test_remove_orphan_dirty_journal_retains_manual_recovery_evidence(
+    monkeypatch, caplog
+):
+    hass, entry, events, _bus = _integration_fakes(monkeypatch, requested=False)
+    entry.data["ownership_dirty"] = True
+
+    with caplog.at_level(logging.CRITICAL, logger="uec.integration"):
+        asyncio.run(integration.async_remove_entry(hass, entry))
+
+    assert events == []
+    assert entry.data["ownership_dirty"] is True
+    assert "manual charger recovery required" in caplog.text
+    assert "journal retained" in caplog.text
+
+
+def test_reconfigure_updates_once_and_listener_performs_only_reload():
+    flow = integration_config_flow()
+    updates: list[dict] = []
+    reloads: list[str] = []
+    entry = SimpleNamespace(
+        entry_id="entry",
+        data={
+            "host": "old-charger",
+            "port": 502,
+            "unit_id": 255,
+            "automatic_control": False,
+        },
+    )
+
+    class ConfigEntries:
+        def __init__(self) -> None:
+            self.reloads = reloads
+
+        def async_get_entry(self, _entry_id):
+            return entry
+
+        def async_update_entry(self, target, *, data) -> None:
+            target.data = data
+            updates.append(dict(data))
+
+        async def async_reload(self, entry_id) -> None:
+            reloads.append(entry_id)
+
+    hass = SimpleNamespace(config_entries=ConfigEntries(), data={})
+    flow.hass = hass
+    flow.context = {"entry_id": entry.entry_id}
+
+    result = asyncio.run(
+        flow.async_step_reconfigure(
+            {"host": "new-charger", "port": 1502, "unit_id": 1}
+        )
+    )
+
+    assert result == {"type": "abort", "reason": "reconfigure_successful"}
+    assert len(updates) == 1
+    assert reloads == []
+    asyncio.run(integration._async_reload_on_update(hass, entry))
+    assert reloads == [entry.entry_id]
 
 
 def test_shutdown_listener_suspends_with_requested_state_preserved(monkeypatch):

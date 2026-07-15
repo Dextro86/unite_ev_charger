@@ -62,6 +62,9 @@ class _Store:
     async def async_save(self, _data) -> None:
         pass
 
+    async def async_remove(self) -> None:
+        pass
+
 
 sys.modules["homeassistant.helpers.storage"].Store = _Store
 
