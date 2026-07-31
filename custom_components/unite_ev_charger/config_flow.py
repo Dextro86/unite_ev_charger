@@ -28,6 +28,7 @@ from .const import (
     CHARGE_MODES,
     CONF_CONTROL_MODE,
     CONF_DEFAULT_MODE,
+    CONF_GRID_PHASES,
     CONF_DLB_CURRENT_L1,
     CONF_DLB_CURRENT_L2,
     CONF_DLB_CURRENT_L3,
@@ -78,6 +79,9 @@ from .const import (
     DEFAULT_REST_USERNAME,
     DEFAULT_UNIT_ID,
     DOMAIN,
+    GRID_PHASES,
+    GRID_PHASES_1,
+    GRID_PHASES_3,
     MAX_POLL_INTERVAL,
     METER_DSMR,
     METER_MODELS,
@@ -123,6 +127,16 @@ def _control_mode_selector() -> selector.SelectSelector:
         selector.SelectSelectorConfig(
             options=list(CONTROL_MODES),
             translation_key="control_mode",
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _grid_phases_selector() -> selector.SelectSelector:
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=list(GRID_PHASES),
+            translation_key="grid_phases",
             mode=selector.SelectSelectorMode.DROPDOWN,
         )
     )
@@ -248,6 +262,19 @@ class UniteOptionsFlow(OptionsFlow):
         # they are staged here and applied once on save.
         self._data_updates: dict[str, Any] = {}
 
+    def _default_grid_phases(self) -> str:
+        """Default the wiring question to what the charger reports (register 404).
+
+        A running coordinator knows ``phases_supported``; fall back to 3-phase
+        only when that is unknown. An explicit user choice always wins, because
+        404 = 0 cannot distinguish a 1-phase install from a stuck 3-phase one.
+        """
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        supported = getattr(getattr(coordinator, "device", None), "phases_supported", None)
+        if supported == 0:
+            return GRID_PHASES_1
+        return GRID_PHASES_3
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
@@ -354,6 +381,9 @@ class UniteOptionsFlow(OptionsFlow):
                 vol.Required(CONF_DEFAULT_MODE, default=DEFAULT_MODE): _mode_selector(),
                 vol.Required(CONF_MIN_CURRENT, default=DEFAULT_MIN_CURRENT_A): _num(6, 32, 1, "A"),
                 vol.Required(CONF_MAX_CURRENT, default=DEFAULT_MAX_CURRENT_A): _num(6, 32, 1, "A"),
+                vol.Required(
+                    CONF_GRID_PHASES, default=self._default_grid_phases()
+                ): _grid_phases_selector(),
                 vol.Required(CONF_PHASE_SWITCHING, default=DEFAULT_PHASE_SWITCHING): bool,
                 vol.Required(
                     CONF_PHASE_RECOVERY_ENABLED, default=DEFAULT_PHASE_RECOVERY_ENABLED

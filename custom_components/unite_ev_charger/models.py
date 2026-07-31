@@ -39,6 +39,9 @@ class WallboxData:
 
     session_energy_kwh: float = 0.0
     session_duration_s: int = 0
+    # RFID tag of the active session (firmware v1.9+; None when unavailable or
+    # when charging without RFID authorisation).
+    session_rfid: str | None = None
 
     # Control snapshot (read from holding registers).
     set_current_a: int | None = None

@@ -124,6 +124,15 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                 self.device.phases_supported = data.phase_capability_raw
             except WebastoModbusError:
                 data.phase_capability_raw = self.device.phases_supported
+            # Session RFID tag: only meaningful while a vehicle is connected, and
+            # absent on firmware older than spec v1.9 - so it is gated and its own
+            # failure never affects the rest of the cycle.
+            if data.vehicle_connected:
+                try:
+                    tag = str(await self.client.read_register(R.SESSION_RFID_TAG)).strip()
+                    data.session_rfid = tag or None
+                except WebastoModbusError:
+                    data.session_rfid = None
 
             # First connect or a reconnect after the wallbox dropped us: the
             # Unite resets its failsafe + charging-current registers on every new

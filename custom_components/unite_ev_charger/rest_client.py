@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from typing import Any
 
 import aiohttp
 
@@ -44,6 +45,17 @@ class UniteRestEndpointMissing(UniteRestError):
     the ``custom-actions`` restart endpoint. This lets the caller fall back to
     the legacy webconfig portal instead of failing outright.
     """
+
+
+class UniteRestValidationError(UniteRestError):
+    """A config write was rejected (HTTP 422). Used to retry with the other
+    payload shape, which varies across firmware."""
+
+
+# The installation phase-config field, exposed both on the JSON API
+# (installationSettings.currentLimiterPhase) and the webconfig
+# (currentLimiterPhaseSelection). 0 = 1-phase, 1 = 3-phase.
+_PHASE_FIELD = "installationSettings.currentLimiterPhase"
 
 
 # --- Variant A: modern JSON API over HTTPS ----------------------------------
@@ -86,7 +98,7 @@ class UniteJsonRestClient:
             raise UniteRestError("Login response did not contain an access token")
         self._token = token
 
-    async def _post(self, path: str) -> None:
+    async def _post(self, path: str, json_body: Any = None) -> None:
         if self._token is None:
             await self._login()
         for attempt in range(2):
@@ -94,6 +106,7 @@ class UniteJsonRestClient:
                 async with self._session.post(
                     f"{self._base}{path}",
                     headers={"Authorization": f"Bearer {self._token}"},
+                    json=json_body,
                     ssl=False,
                     timeout=_TIMEOUT,
                 ) as resp:
@@ -104,6 +117,10 @@ class UniteJsonRestClient:
                     if resp.status == 404:
                         raise UniteRestEndpointMissing(
                             f"REST endpoint {path} not present on this firmware (HTTP 404)"
+                        )
+                    if resp.status == 422:
+                        raise UniteRestValidationError(
+                            f"Config write to {path} rejected (HTTP 422)"
                         )
                     if resp.status not in (200, 201, 202, 204):
                         raise UniteRestError(f"Unexpected status {resp.status} for {path}")
@@ -118,10 +135,27 @@ class UniteJsonRestClient:
     async def restart_system(self) -> None:
         await self._post("/custom-actions/restart-system")
 
+    async def set_current_limiter_phase(self, value: int) -> None:
+        """Set the installation phase config (0 = 1-phase, 1 = 3-phase).
+
+        The payload shape varies across firmware: some accept a plain integer,
+        others require a nested selection object. Try the int first, fall back
+        to the nested form on a validation error.
+        """
+        try:
+            await self._post(
+                "/configuration-updates", [{"fieldKey": _PHASE_FIELD, "value": value}]
+            )
+        except UniteRestValidationError:
+            await self._post(
+                "/configuration-updates",
+                [{"fieldKey": _PHASE_FIELD, "value": {"value": value, "valueType": "selection"}}],
+            )
+
 
 # --- Variant B: legacy webconfig PHP portal over HTTP ------------------------
 class UnitePhpRestClient:
-    """Cookie login -> scrape CSRF token -> POST the Soft Reset.
+    """Cookie login -> scrape CSRF token -> POST the reset.
 
     Uses its own short-lived session with an *unsafe* cookie jar, because the
     charger is an IP host and aiohttp's default jar drops cookies from IPs.
@@ -150,7 +184,23 @@ class UnitePhpRestClient:
             cookie_jar=aiohttp.CookieJar(unsafe=True), timeout=_TIMEOUT
         )
 
-    async def _login_and_token(self, session: aiohttp.ClientSession) -> str:
+    @staticmethod
+    def _selected_option(html: str, name: str) -> str | None:
+        """The selected <option value> of the <select name=...> in the page."""
+        sm = re.search(
+            r'<select\b[^>]*\bname=["\']?' + re.escape(name) + r'["\']?[^>]*>(.*?)</select>',
+            html,
+            re.S,
+        )
+        if not sm:
+            return None
+        om = re.search(
+            r'<option[^>]*\bvalue=["\']?([^"\'>\s]*)["\']?[^>]*\bselected', sm.group(1)
+        )
+        return om.group(1) if om else None
+
+    async def _login_and_page(self, session: aiohttp.ClientSession) -> str:
+        """Log in and return the settings page HTML (holds the CSRF token + forms)."""
         try:
             async with session.get(f"{self._base}/") as r:
                 await r.read()  # seed the PHPSESSID cookie
@@ -163,7 +213,10 @@ class UnitePhpRestClient:
             raise UniteRestError(f"Cannot reach the charger web UI: {err}") from err
         if self.is_login_page(html):  # still the login form -> bad credentials
             raise UniteRestAuthError("Invalid web UI username or password")
-        token = self.extract_token(html)
+        return html
+
+    async def _login_and_token(self, session: aiohttp.ClientSession) -> str:
+        token = self.extract_token(await self._login_and_page(session))
         if not token:
             raise UniteRestError("Could not read the CSRF token after login")
         return token
@@ -175,14 +228,45 @@ class UnitePhpRestClient:
     async def restart_system(self) -> None:
         async with self._new_session() as session:
             token = await self._login_and_token(session)
-            # Verified against a real "Soft Reset -> Confirm" capture (HAR): a
-            # form POST to index_main.php with the CSRF token and the submit
-            # button's default value "Submit Query" (an empty value is ignored).
-            form = {"token": token, "button_soft_reset": "Submit Query"}
+            # Hard reset: restarts immediately regardless of state, matching the
+            # JSON API's restart-system so the button behaves the same on every
+            # firmware. Form POST to index_main.php with the CSRF token and the
+            # submit button's default value "Submit Query" (an empty value is
+            # ignored). The soft-reset variant ("button_soft_reset") was HAR-
+            # verified; button_hard_reset is by analogy and still needs a live
+            # check on a webconfig (Ethernet) charger.
+            form = {"token": token, "button_hard_reset": "Submit Query"}
             try:
                 async with session.post(f"{self._base}/index_main.php", data=form, allow_redirects=False) as r:
                     if r.status not in (200, 302, 303):
-                        raise UniteRestError(f"Soft reset returned status {r.status}")
+                        raise UniteRestError(f"Hard reset returned status {r.status}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                raise UniteRestError(f"Cannot reach the charger web UI: {err}") from err
+
+    async def set_current_limiter_phase(self, value: int) -> None:
+        """Set the installation phase config (0 = 1-phase, 1 = 3-phase) via the
+        webconfig current-limiter form. The existing current-limiter value is
+        read back and re-sent so only the phase changes."""
+        async with self._new_session() as session:
+            html = await self._login_and_page(session)
+            token = self.extract_token(html)
+            if not token:
+                raise UniteRestError("Could not read the CSRF token after login")
+            limiter_value = self._selected_option(html, "currentLimiterValue")
+            if limiter_value is None:
+                raise UniteRestError("Could not read currentLimiterValue from the web UI")
+            form = {
+                "token": token,
+                "currentLimiterPhaseSelection": str(value),
+                "currentLimiterValue": limiter_value,
+                "button_current_limiter_settings": "Submit Query",
+            }
+            try:
+                async with session.post(
+                    f"{self._base}/index_main.php", data=form, allow_redirects=False
+                ) as r:
+                    if r.status not in (200, 302, 303):
+                        raise UniteRestError(f"Phase config write returned status {r.status}")
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 raise UniteRestError(f"Cannot reach the charger web UI: {err}") from err
 
@@ -242,7 +326,7 @@ async def async_restart_charger(
 
     Prefers the clean JSON API, but some firmware serves a working JSON login
     without the restart endpoint (it 404s). In that case we fall back to the
-    legacy webconfig soft-reset. Returns a short label of the route used.
+    legacy webconfig reset. Returns a short label of the route used.
     Authentication failures are *not* swallowed -- they propagate so the caller
     can report ``auth_failed`` rather than masking bad credentials.
     """
@@ -263,12 +347,61 @@ async def async_restart_charger(
 
     if await _has_webconfig(session, host):
         await UnitePhpRestClient(host, username, password).restart_system()
-        _LOGGER.debug("Restarted charger %s via webconfig soft-reset", host)
+        _LOGGER.debug("Restarted charger %s via webconfig reset", host)
         return "webconfig"
 
     if json_endpoint_missing:
         raise UniteRestError(
             "The JSON API has no restart endpoint on this firmware and no "
+            "webconfig portal was found to fall back to"
+        )
+    raise UniteRestError(
+        "No reachable web UI found (tried the JSON API on 443/4443 and the HTTP webconfig portal)"
+    )
+
+
+async def async_restore_three_phase(
+    session: aiohttp.ClientSession,
+    host: str,
+    username: str,
+    password: str,
+    *,
+    settle_s: float = 10.0,
+) -> str:
+    """Force the installation phase config back to 3-phase.
+
+    Toggles ``currentLimiterPhase`` 0 -> (settle) -> 1 so a stuck desync (register
+    404 = 0 while the UI still shows 3-phase) is re-synced; writing 1 alone can be
+    a no-op when the config layer thinks it is already 3-phase. Uses the JSON
+    config API where present, else the webconfig form. Returns the route used.
+    Auth failures propagate.
+    """
+    json_endpoint_missing = False
+    for port in JSON_API_PORTS:
+        if not await _probe_json_api(session, host, port):
+            continue
+        client = UniteJsonRestClient(session, host, username, password, port=port)
+        try:
+            await client.set_current_limiter_phase(0)
+        except UniteRestEndpointMissing:
+            json_endpoint_missing = True  # login works but no config endpoint here
+            break
+        await asyncio.sleep(settle_s)
+        await client.set_current_limiter_phase(1)
+        _LOGGER.debug("Restored 3-phase config on %s via JSON API on port %s", host, port)
+        return f"json:{port}"
+
+    if await _has_webconfig(session, host):
+        php = UnitePhpRestClient(host, username, password)
+        await php.set_current_limiter_phase(0)
+        await asyncio.sleep(settle_s)
+        await php.set_current_limiter_phase(1)
+        _LOGGER.debug("Restored 3-phase config on %s via webconfig", host)
+        return "webconfig"
+
+    if json_endpoint_missing:
+        raise UniteRestError(
+            "The JSON API has no configuration endpoint on this firmware and no "
             "webconfig portal was found to fall back to"
         )
     raise UniteRestError(

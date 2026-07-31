@@ -82,3 +82,17 @@ def test_iec61851_status():
     assert d.iec61851_status == "C"  # charging
     d.charge_point_state_raw = int(ChargePointState.FAULTED)
     assert d.iec61851_status == "F"  # fault takes precedence
+
+
+def test_decode_session_rfid_string():
+    """RFID tag: 15 registers of ASCII, null-padded (Vestel spec v1.9+)."""
+    from uec import registers as R
+
+    def regs(text: str) -> list[int]:
+        b = text.encode("ascii").ljust(30, b"\x00")
+        return [int.from_bytes(b[i:i + 2], "big") for i in range(0, 30, 2)]
+
+    assert R.decode_scalar(R.SESSION_RFID_TAG, regs("04A1B2C3D4")) == "04A1B2C3D4"
+    # an idle charger reports all zeros -> empty string (the coordinator maps
+    # that to None so the sensor reads 'unknown' instead of blank)
+    assert R.decode_scalar(R.SESSION_RFID_TAG, [0] * 15) == ""

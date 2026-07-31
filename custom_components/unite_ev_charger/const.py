@@ -197,3 +197,13 @@ DEFAULT_REST_USERNAME: Final = "admin"
 # (Modbus recovers a bit sooner). Block repeat presses for that window so a
 # second press gives a clear "wait" instead of a connection error.
 REST_RESTART_COOLDOWN_S: Final = 300
+PHASE_RESTORE_COOLDOWN_S: Final = 60  # blocks re-press while the 0->1 toggle runs
+
+# How the wallbox is physically wired. Register 404 alone cannot tell a genuine
+# 1-phase installation apart from a 3-phase charger stuck at 1-phase, so the
+# phase-config restore is gated on this explicit setting. Defaults to what the
+# charger reports at setup; the user can correct it.
+CONF_GRID_PHASES: Final = "grid_phases"
+GRID_PHASES_1: Final = "1"
+GRID_PHASES_3: Final = "3"
+GRID_PHASES: Final = (GRID_PHASES_1, GRID_PHASES_3)

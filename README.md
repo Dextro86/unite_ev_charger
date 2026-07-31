@@ -128,8 +128,8 @@ diagnostic sensors show the recovery state and remaining time.
 > car-dependent behaviour above, the Unite firmware itself sometimes gets stuck:
 > after one charging session ends and a new one starts, the charger can begin on a
 > single phase even though 3-phase is requested (`405 = 3`) and stay locked that
-> way. A live phase switch does not clear it — the only reliable fix is a
-> **soft reset** of the charger, which you can trigger from the
+> way. A live phase switch does not clear it — the reliable fix is a
+> **restart** of the charger, which you can trigger from the
 > [Restart button](#restart-button-web-ui).
 
 Note: register `405` resets to its `404` default on **every** Modbus disconnect
@@ -164,7 +164,11 @@ UI**. Different Unite firmware/interfaces expose different web UIs, so the butto
 **auto-detects** the right one: the modern JSON API over HTTPS (on port `443` or
 `4443`, self-signed certificate) or the legacy "webconfig" portal over HTTP. If the
 JSON API is present but has no restart endpoint on that firmware, it automatically
-falls back to the webconfig soft-reset — so the button works across Unite variants.
+falls back to the webconfig reset — so the button works across Unite variants.
+
+It performs a **hard reset** (restart immediately, regardless of state), so the
+button does the same thing on every firmware. Note that this **interrupts an active
+charging session** — it's meant as a deliberate manual action.
 
 It is **opt-in**: enable it under *Settings → Restart (web UI)* and enter the web-UI
 username (default `admin`) and password; only then does the **Restart** button
@@ -179,7 +183,7 @@ and the web UI in ~5 min, so repeat presses are ignored for a short cooldown.
 
 Set *Charging control* to **External** and the built-in loop goes passive; the
 entities become a faithful passthrough for evcc's
-[Home Assistant charger](https://docs.evcc.io/en/docs/devices/chargers#home-assistant).
+[Home Assistant charger](https://docs.evcc.io/en/chargers/home-assistant-charger/).
 The entity IDs are **fixed and language-independent** (they don't change with your
 Home Assistant language), so you can copy this straight into your `evcc.yaml`:
 
@@ -188,17 +192,23 @@ chargers:
   - name: unite
     type: template
     template: homeassistant
-    baseurl: http://homeassistant.local:8123   # or http://<HA-IP>:8123
-    token: <long-lived-access-token>            # HA -> profile -> Long-lived access tokens
-    status:     sensor.unite_ev_charger_evcc_status
-    enabled:    switch.unite_ev_charger_charging_enabled
-    enable:     switch.unite_ev_charger_charging_enabled
-    maxcurrent: number.unite_ev_charger_charge_current
+    uri: http://homeassistant.local:8123     # or http://<HA-IP>:8123
+    token: <long-lived-access-token>          # HA -> profile -> Long-lived access tokens
+    status: sensor.unite_ev_charger_evcc_status
+    enabled: switch.unite_ev_charger_charging_enabled
+    enable: switch.unite_ev_charger_charging_enabled
+    setMaxCurrent: number.unite_ev_charger_charge_current
     # optional telemetry:
-    power:      sensor.unite_ev_charger_active_power
-    energy:     sensor.unite_ev_charger_meter_energy
+    power: sensor.unite_ev_charger_active_power
+    energy: sensor.unite_ev_charger_meter_energy
+    currentL1: sensor.unite_ev_charger_current_l1
+    currentL2: sensor.unite_ev_charger_current_l2
+    currentL3: sensor.unite_ev_charger_current_l3
+    voltageL1: sensor.unite_ev_charger_voltage_l1
+    voltageL2: sensor.unite_ev_charger_voltage_l2
+    voltageL3: sensor.unite_ev_charger_voltage_l3
     # optional 1p/3p phase switching:
-    phases1p3p: select.unite_ev_charger_phase_select
+    phaseswitch: select.unite_ev_charger_phase_select
 ```
 
 The IDs above are what a single charger gets. If you added a **second** charger,
@@ -209,14 +219,43 @@ Full entity reference:
 
 | evcc field | Entity ID |
 |---|---|
-| status | `sensor.unite_ev_charger_evcc_status` |
-| enabled / enable | `switch.unite_ev_charger_charging_enabled` |
-| maxcurrent | `number.unite_ev_charger_charge_current` |
-| power | `sensor.unite_ev_charger_active_power` |
-| energy | `sensor.unite_ev_charger_meter_energy` |
-| currentL1 / L2 / L3 | `sensor.unite_ev_charger_current_l1` / `_l2` / `_l3` |
-| voltageL1 / L2 / L3 | `sensor.unite_ev_charger_voltage_l1` / `_l2` / `_l3` |
-| phases1p3p | `select.unite_ev_charger_phase_select` |
+| `status` | `sensor.unite_ev_charger_evcc_status` |
+| `enabled` / `enable` | `switch.unite_ev_charger_charging_enabled` |
+| `setMaxCurrent` | `number.unite_ev_charger_charge_current` |
+| `power` | `sensor.unite_ev_charger_active_power` |
+| `energy` | `sensor.unite_ev_charger_meter_energy` |
+| `currentL1` / `L2` / `L3` | `sensor.unite_ev_charger_current_l1` / `_l2` / `_l3` |
+| `voltageL1` / `L2` / `L3` | `sensor.unite_ev_charger_voltage_l1` / `_l2` / `_l3` |
+| `phaseswitch` | `select.unite_ev_charger_phase_select` |
 
 The heartbeat keeps running so the wallbox never drops to failsafe; evcc owns all
 charging decisions. Mode/Solar/DLB entities are unavailable in this mode.
+
+### RFID tag (session billing / vehicle identification)
+
+The charger reports the RFID tag of the running session (Modbus `1516-1530`,
+firmware from Vestel spec v1.9 / 2023 onward) as
+`sensor.unite_ev_charger_session_rfid`. It is empty when charging freely, and
+unavailable on older firmware. The integration only reads it while a vehicle is
+connected, so it costs nothing when idle.
+
+evcc uses such a tag through its `identify` field, to match a session to a
+vehicle (see [vehicle identification](https://docs.evcc.io/en/reference/configuration/vehicles/)).
+**The `homeassistant` charger template has no `identify` field**, so to use this
+you have to define a `custom` charger instead of the template above, and add the
+tag as an `identify` plugin:
+
+```yaml
+    identify:
+      source: http
+      uri: http://homeassistant.local:8123/api/states/sensor.unite_ev_charger_session_rfid
+      headers:
+        Authorization: Bearer <long-lived-access-token>
+      jq: .state
+```
+
+Note that a `custom` charger means defining every other field (`status`,
+`enabled`, `enable`, `maxcurrent`, …) as plugins too — see evcc's
+[custom charger docs](https://docs.evcc.io/en/docs/devices/chargers#custom).
+The snippet above is a starting point for the RFID part only; it has not been
+validated end-to-end by this project.

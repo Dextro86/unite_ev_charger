@@ -69,6 +69,11 @@ SESSION_COUNT = 8  # 1502..1509 inclusive
 SESSION_ENERGY_KWH = RegisterDef("session_energy_kwh", 1502, RegType.INPUT, ValType.U32, count=2, scale=0.001)
 SESSION_DURATION_S = RegisterDef("session_duration_s", 1508, RegType.INPUT, ValType.U32, count=2)
 
+# RFID tag of the active session. Outside the session block on purpose: it only
+# exists on firmware from spec v1.9 (2023) onwards, so it is read separately and
+# a failure there must not break the session block for older chargers.
+SESSION_RFID_TAG = RegisterDef("session_rfid", 1516, RegType.INPUT, ValType.STRING, count=15)
+
 # --- Control (HOLDING) ------------------------------------------------------
 # 0 = single phase, 1 = three phase. Firmware dependent; may be unavailable.
 PHASE_SWITCH = RegisterDef("phase_switch", 405, RegType.HOLDING, ValType.U16, writable=True)

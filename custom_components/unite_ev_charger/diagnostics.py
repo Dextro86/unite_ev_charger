@@ -11,12 +11,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from . import control as ctrl
-from .const import CONF_HOST, CONF_REST_PASSWORD, CONF_REST_USERNAME, DOMAIN
+from .const import CONF_HOST, CONF_REST_PASSWORD, CONF_REST_USERNAME, DOMAIN, PHASE_3P
 from .coordinator import WebastoCoordinator
 
 # Never leak the wallbox address, serial, or the web-UI credentials in a
 # downloadable diagnostics file.
-TO_REDACT = {CONF_HOST, CONF_REST_USERNAME, CONF_REST_PASSWORD, "serial_number"}
+TO_REDACT = {CONF_HOST, CONF_REST_USERNAME, CONF_REST_PASSWORD, "serial_number", "session_rfid"}
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -61,8 +61,9 @@ async def async_get_config_entry_diagnostics(
 
     # Interpreted state (the State Inspector), so a bug report reads on its own.
     if data is not None:
+        requested_3p = controller is not None and controller.requested_phase == PHASE_3P
         mismatch = ctrl.is_phase_mismatch(
-            data.charging, data.phase_switch_raw,
+            data.charging, requested_3p,
             data.current_l1_a, data.current_l2_a, data.current_l3_a,
         )
         restarting = (

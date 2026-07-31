@@ -18,6 +18,7 @@ from uec.rest_client import (
     UniteRestError,
     async_build_rest_client,
     async_restart_charger,
+    async_restore_three_phase,
 )
 
 
@@ -213,7 +214,7 @@ def test_restart_falls_back_to_webconfig_on_json_404(monkeypatch):
     session = RestartSession({4443}, restart_status=404, webconfig_body=_LOGIN_FORM)
     route = asyncio.run(async_restart_charger(session, "10.0.0.5", "admin", "x"))
     assert route == "webconfig"
-    assert called == ["10.0.0.5"]  # webconfig soft-reset actually fired
+    assert called == ["10.0.0.5"]  # webconfig reset actually fired
     assert session.restart_urls  # and only after the JSON restart was tried
 
 
@@ -236,3 +237,102 @@ def test_restart_json_404_and_no_webconfig_raises():
     session = RestartSession({4443}, restart_status=404, webconfig_body="<html>nope</html>")
     with pytest.raises(UniteRestError):
         asyncio.run(async_restart_charger(session, "10.0.0.5", "admin", "x"))
+
+
+# --- phase-config restore (currentLimiterPhase 0->1) ------------------------
+_PHASE_FIELD = "installationSettings.currentLimiterPhase"
+
+
+class ConfigSession:
+    """JSON session: login ok, then queued statuses for /configuration-updates.
+    Records the posted JSON bodies so we can assert the payload shape."""
+
+    def __init__(self, statuses):
+        self._statuses = list(statuses)
+        self.bodies: list = []
+
+    def post(self, url, **kwargs):
+        if url.endswith("/api/login"):
+            return FakeResp(201, {"access_token": "tok"})
+        self.bodies.append(kwargs.get("json"))
+        return FakeResp(self._statuses.pop(0))
+
+
+def test_json_set_phase_accepts_plain_int():
+    s = ConfigSession([200])
+    asyncio.run(_json_client(s).set_current_limiter_phase(0))
+    assert s.bodies == [[{"fieldKey": _PHASE_FIELD, "value": 0}]]
+
+
+def test_json_set_phase_falls_back_to_nested_on_422():
+    # firmware that rejects the plain int -> retry with the nested selection form
+    s = ConfigSession([422, 200])
+    asyncio.run(_json_client(s).set_current_limiter_phase(1))
+    assert s.bodies[0] == [{"fieldKey": _PHASE_FIELD, "value": 1}]
+    assert s.bodies[1] == [
+        {"fieldKey": _PHASE_FIELD, "value": {"value": 1, "valueType": "selection"}}
+    ]
+
+
+def test_php_selected_option_reads_current_limiter_value():
+    html = (
+        '<select name="currentLimiterValue">'
+        '<option value="6">6</option>'
+        '<option value="16" selected>16</option>'
+        '</select>'
+    )
+    assert UnitePhpRestClient._selected_option(html, "currentLimiterValue") == "16"
+    assert UnitePhpRestClient._selected_option(html, "nope") is None
+
+
+class RestoreSession:
+    """Drives async_restore_three_phase: JSON login on given ports + config
+    writes; records config bodies; serves a webconfig GET body."""
+
+    def __init__(self, json_ports, *, config_status=200, webconfig_body=""):
+        self.json_ports = set(json_ports)
+        self.config_status = config_status
+        self.webconfig_body = webconfig_body
+        self.config_posts: list = []
+
+    def post(self, url, **kwargs):
+        if url.endswith("/api/login"):
+            if not any(f":{p}/" in url for p in self.json_ports):
+                return _RaisingCtx()
+            return FakeResp(201, {"access_token": "tok"})
+        if "configuration-updates" in url:
+            self.config_posts.append(kwargs.get("json"))
+            return FakeResp(self.config_status)
+        return _RaisingCtx()
+
+    def get(self, url, **kwargs):
+        return FakeResp(200, text=self.webconfig_body)
+
+
+def test_restore_three_phase_toggles_via_json():
+    session = RestoreSession({443})
+    route = asyncio.run(
+        async_restore_three_phase(session, "10.0.0.5", "admin", "x", settle_s=0)
+    )
+    assert route == "json:443"
+    # 0 then 1, both plain int
+    assert session.config_posts == [
+        [{"fieldKey": _PHASE_FIELD, "value": 0}],
+        [{"fieldKey": _PHASE_FIELD, "value": 1}],
+    ]
+
+
+def test_restore_three_phase_falls_back_to_webconfig(monkeypatch):
+    calls: list[int] = []
+
+    async def fake_php_set(self, value):
+        calls.append(value)
+
+    monkeypatch.setattr(UnitePhpRestClient, "set_current_limiter_phase", fake_php_set)
+    # JSON login works but the config endpoint 404s -> webconfig
+    session = RestoreSession({4443}, config_status=404, webconfig_body=_LOGIN_FORM)
+    route = asyncio.run(
+        async_restore_three_phase(session, "10.0.0.5", "admin", "x", settle_s=0)
+    )
+    assert route == "webconfig"
+    assert calls == [0, 1]  # toggle ran on the webconfig client

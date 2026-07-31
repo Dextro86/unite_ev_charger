@@ -24,7 +24,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import control as ctrl
-from .const import CHARGER_STATES, CONF_REST_ENABLED, DEFAULT_REST_ENABLED, DOMAIN
+from .const import CHARGER_STATES, CONF_REST_ENABLED, DEFAULT_REST_ENABLED, DOMAIN, PHASE_3P
 from .coordinator import WebastoCoordinator
 from .entity import UniteEntity
 from .models import WallboxData
@@ -172,6 +172,16 @@ SENSORS: tuple[UniteSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.phase_switch_raw,
     ),
+    # RFID tag of the running session. Empty on chargers that charge freely, and
+    # absent on firmware older than spec v1.9. Useful for per-user billing and
+    # for evcc vehicle identification (via a custom charger).
+    UniteSensorDescription(
+        key="session_rfid",
+        translation_key="session_rfid",
+        icon="mdi:card-account-details-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.session_rfid,
+    ),
 )
 
 
@@ -285,8 +295,9 @@ class UniteChargerStateSensor(UniteEntity, SensorEntity):
         if data is None:
             return None
         controller = coord.controller
+        requested_3p = controller is not None and controller.requested_phase == PHASE_3P
         mismatch = ctrl.is_phase_mismatch(
-            data.charging, data.phase_switch_raw,
+            data.charging, requested_3p,
             data.current_l1_a, data.current_l2_a, data.current_l3_a,
         )
         return ctrl.derive_charger_state(

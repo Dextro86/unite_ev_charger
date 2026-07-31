@@ -11,16 +11,16 @@ LIMITS = C.Limits(min_current=6, max_current=16, cable_max=32)
 
 # --- state inspector + phase mismatch ---------------------------------------
 def test_is_phase_mismatch():
-    # set to 3-phase (405=1) but only L1 drawing -> mismatch
-    assert C.is_phase_mismatch(True, 1, 15.0, 0.0, 0.4) is True
-    # genuinely 3-phase -> no mismatch
-    assert C.is_phase_mismatch(True, 1, 15.0, 15.0, 15.0) is False
-    # single-phase configured -> no mismatch
-    assert C.is_phase_mismatch(True, 0, 15.0, 0.0, 0.0) is False
+    # 3-phase actively requested but only L1 drawing -> mismatch
+    assert C.is_phase_mismatch(True, True, 15.0, 0.0, 0.4) is True
+    # 3-phase requested and genuinely 3-phase -> no mismatch
+    assert C.is_phase_mismatch(True, True, 15.0, 15.0, 15.0) is False
+    # no 3-phase request (e.g. a 1-phase car) -> never a mismatch, even on L1 only.
+    # This is the false positive we fixed: 405 resting at its 3-phase default is
+    # not a request.
+    assert C.is_phase_mismatch(True, False, 15.0, 0.0, 0.0) is False
     # not charging -> never a mismatch
-    assert C.is_phase_mismatch(False, 1, 0.0, 0.0, 0.0) is False
-    # unknown register -> no false alarm
-    assert C.is_phase_mismatch(True, None, 15.0, 0.0, 0.0) is False
+    assert C.is_phase_mismatch(False, True, 0.0, 0.0, 0.0) is False
 
 
 def _state(**over):
@@ -171,3 +171,14 @@ def test_phase_no_flapping_in_hysteresis_band():
     # In the band [3726, 4140) the phase count stays whatever it currently is.
     assert C.desired_phases(3900, 230, 6, current_phases=1) == 1
     assert C.desired_phases(3900, 230, 6, current_phases=3) == 3
+
+
+# --- 3-phase restore gating (1-phase installs must not get the button) ------
+def test_is_three_phase_install():
+    # explicit user setting wins in both directions
+    assert C.is_three_phase_install("3", 0) is True   # stuck charger, user knows it is 3P
+    assert C.is_three_phase_install("1", 1) is False  # user says 1P -> never offer restore
+    # unset -> follow the charger's own register 404
+    assert C.is_three_phase_install(None, 1) is True
+    assert C.is_three_phase_install(None, 0) is False  # genuine 1-phase install
+    assert C.is_three_phase_install(None, None) is True  # unknown -> assume 3P default

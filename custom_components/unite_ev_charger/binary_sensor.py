@@ -15,15 +15,25 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import control as ctrl
-from .const import DOMAIN
+from .const import DOMAIN, PHASE_3P
 from .coordinator import WebastoCoordinator
 from .entity import UniteEntity
-from .models import WallboxData
+
+
+def _phase_mismatch(coordinator: WebastoCoordinator) -> bool:
+    """Only a real mismatch when 3-phase was actively requested (not the resting
+    405 default), so a 1-phase car never trips it. See control.is_phase_mismatch."""
+    d = coordinator.data
+    controller = coordinator.controller
+    requested_3p = controller is not None and controller.requested_phase == PHASE_3P
+    return ctrl.is_phase_mismatch(
+        d.charging, requested_3p, d.current_l1_a, d.current_l2_a, d.current_l3_a
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
 class UniteBinaryDescription(BinarySensorEntityDescription):
-    value_fn: Callable[[WallboxData], bool]
+    value_fn: Callable[[WebastoCoordinator], bool]
 
 
 BINARY_SENSORS: tuple[UniteBinaryDescription, ...] = (
@@ -31,30 +41,28 @@ BINARY_SENSORS: tuple[UniteBinaryDescription, ...] = (
         key="vehicle_connected",
         translation_key="vehicle_connected",
         device_class=BinarySensorDeviceClass.PLUG,
-        value_fn=lambda d: d.vehicle_connected,
+        value_fn=lambda c: c.data.vehicle_connected,
     ),
     UniteBinaryDescription(
         key="charging",
         translation_key="charging",
         device_class=BinarySensorDeviceClass.BATTERY_CHARGING,
-        value_fn=lambda d: d.charging,
+        value_fn=lambda c: c.data.charging,
     ),
     UniteBinaryDescription(
         key="fault",
         translation_key="fault",
         device_class=BinarySensorDeviceClass.PROBLEM,
-        value_fn=lambda d: d.faulted,
+        value_fn=lambda c: c.data.faulted,
     ),
-    # Set to 3-phase (405=1) but the car draws single-phase -> the classic
-    # "says 3, charges 1" stuck upshift, made directly visible.
+    # 3-phase actively requested but the car draws single-phase -> the classic
+    # "asked 3, charges 1" stuck upshift, made directly visible.
     UniteBinaryDescription(
         key="phase_mismatch",
         translation_key="phase_mismatch",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: ctrl.is_phase_mismatch(
-            d.charging, d.phase_switch_raw, d.current_l1_a, d.current_l2_a, d.current_l3_a
-        ),
+        value_fn=_phase_mismatch,
     ),
 )
 
@@ -85,7 +93,7 @@ class UniteBinarySensor(UniteEntity, BinarySensorEntity):
     def is_on(self) -> bool | None:
         if self.coordinator.data is None:
             return None
-        return self.entity_description.value_fn(self.coordinator.data)
+        return self.entity_description.value_fn(self.coordinator)
 
 
 class UniteConnectionSensor(UniteEntity, BinarySensorEntity):

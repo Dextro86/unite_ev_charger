@@ -45,21 +45,51 @@
           "faulted": "Storing"
         }
       },
-      "active_power": { "name": "Vermogen" },
-      "current_l1": { "name": "Stroom L1" },
-      "current_l2": { "name": "Stroom L2" },
-      "current_l3": { "name": "Stroom L3" },
-      "voltage_l1": { "name": "Spanning L1" },
-      "voltage_l2": { "name": "Spanning L2" },
-      "voltage_l3": { "name": "Spanning L3" },
-      "session_energy": { "name": "Sessie-energie" },
-      "session_duration": { "name": "Sessieduur" },
-      "meter_energy": { "name": "Totale energie" },
-      "set_current": { "name": "Hardware laadstroomlimiet" },
-      "available_surplus": { "name": "Beschikbaar zonoverschot" },
-      "control_setpoint": { "name": "Regeldoel stroom" },
-      "phases_in_use": { "name": "Fasen in gebruik" },
-      "evcc_status": { "name": "evcc-status" },
+      "active_power": {
+        "name": "Vermogen"
+      },
+      "current_l1": {
+        "name": "Stroom L1"
+      },
+      "current_l2": {
+        "name": "Stroom L2"
+      },
+      "current_l3": {
+        "name": "Stroom L3"
+      },
+      "voltage_l1": {
+        "name": "Spanning L1"
+      },
+      "voltage_l2": {
+        "name": "Spanning L2"
+      },
+      "voltage_l3": {
+        "name": "Spanning L3"
+      },
+      "session_energy": {
+        "name": "Sessie-energie"
+      },
+      "session_duration": {
+        "name": "Sessieduur"
+      },
+      "meter_energy": {
+        "name": "Totale energie"
+      },
+      "set_current": {
+        "name": "Hardware laadstroomlimiet"
+      },
+      "available_surplus": {
+        "name": "Beschikbaar zonoverschot"
+      },
+      "control_setpoint": {
+        "name": "Regeldoel stroom"
+      },
+      "phases_in_use": {
+        "name": "Fasen in gebruik"
+      },
+      "evcc_status": {
+        "name": "evcc-status"
+      },
       "charger_state": {
         "name": "Laderstatus",
         "state": {
@@ -73,22 +103,49 @@
           "fault": "Storing"
         }
       },
-      "last_recovery": { "name": "Laatste faseherstel" },
-      "last_restart": { "name": "Laatste herstart" },
-      "register_404": { "name": "Register 404" },
-      "register_405": { "name": "Register 405" },
-      "recovery_status": { "name": "Fase-herstel status" },
-      "recovery_remaining": { "name": "Fase-herstel resterend" }
+      "last_recovery": {
+        "name": "Laatste faseherstel"
+      },
+      "last_restart": {
+        "name": "Laatste herstart"
+      },
+      "register_404": {
+        "name": "Register 404"
+      },
+      "register_405": {
+        "name": "Register 405"
+      },
+      "recovery_status": {
+        "name": "Fase-herstel status"
+      },
+      "recovery_remaining": {
+        "name": "Fase-herstel resterend"
+      },
+      "session_rfid": {
+        "name": "RFID-tag sessie"
+      }
     },
     "binary_sensor": {
-      "vehicle_connected": { "name": "Auto verbonden" },
-      "charging": { "name": "Laden" },
-      "fault": { "name": "Storing" },
-      "phase_mismatch": { "name": "Fase-mismatch" },
-      "connection": { "name": "Verbinding" }
+      "vehicle_connected": {
+        "name": "Auto verbonden"
+      },
+      "charging": {
+        "name": "Laden"
+      },
+      "fault": {
+        "name": "Storing"
+      },
+      "phase_mismatch": {
+        "name": "Fase-mismatch"
+      },
+      "connection": {
+        "name": "Verbinding"
+      }
     },
     "switch": {
-      "charging": { "name": "Laden" }
+      "charging": {
+        "name": "Laden"
+      }
     },
     "select": {
       "mode": {
@@ -100,7 +157,9 @@
           "min_solar": "Minimum en Zon"
         }
       },
-      "phase_select": { "name": "Fase" },
+      "phase_select": {
+        "name": "Fase"
+      },
       "phase_preference": {
         "name": "Fasen",
         "state": {
@@ -111,10 +170,17 @@
       }
     },
     "number": {
-      "charge_current": { "name": "Laadstroom" }
+      "charge_current": {
+        "name": "Laadstroom"
+      }
     },
     "button": {
-      "restart": { "name": "Herstart" }
+      "restart": {
+        "name": "Herstart"
+      },
+      "restore_three_phase": {
+        "name": "3-fase-config herstellen"
+      }
     }
   },
   "options": {
@@ -147,6 +213,7 @@
           "default_mode": "Standaard modus",
           "min_current": "Minimale laadstroom (A)",
           "max_current": "Maximale laadstroom (A)",
+          "grid_phases": "Netaansluiting lader",
           "phase_switching": "Fasewissel inschakelen (1<->3)",
           "phase_recovery_enabled": "1→3 faseherstel inschakelen",
           "phase_recovery_observe": "Observatietijd 1→3 (s)",
@@ -156,7 +223,9 @@
       "meter": {
         "title": "Energiemeter",
         "description": "Kies hoe je je net-/zonvermogen meet. Gedeeld door Zon en DLB.",
-        "data": { "meter_model": "Type meter" }
+        "data": {
+          "meter_model": "Type meter"
+        }
       },
       "meter_signed": {
         "title": "Netvermogen-sensor",
@@ -249,6 +318,12 @@
         "signed_grid": "HomeWizard P1 / netvermogen",
         "dsmr": "DSMR (import + export)",
         "surplus": "Overschot-sensor"
+      }
+    },
+    "grid_phases": {
+      "options": {
+        "1": "1-fase (1P)",
+        "3": "3-fase (3P)"
       }
     }
   }

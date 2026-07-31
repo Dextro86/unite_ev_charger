@@ -15,6 +15,7 @@ from .const import (
     MODE_MANUAL,
     MODE_MIN_SOLAR,
     MODE_SOLAR,
+    GRID_PHASES_3,
     NOMINAL_VOLTAGE,
     PHASE_MEASURE_OFF_A,
     PHASE_MEASURE_ON_A,
@@ -26,21 +27,33 @@ from .const import (
 
 def is_phase_mismatch(
     charging: bool,
-    phase_switch_raw: int | None,
+    requested_3p: bool,
     l1: float,
     l2: float,
     l3: float,
 ) -> bool:
-    """True when the charger is set to 3-phase (405=1) but the car draws only 1.
+    """True when 3-phase was actively requested but the car draws only 1.
 
-    Only asserted with a confident single-phase reading while charging, so a
-    ramping car does not raise a false alarm.
+    Gated on an explicit 3-phase request, NOT on register 405: 405 rests at its
+    3-phase default on a 3-phase install, so a 1-phase car would otherwise look
+    like a permanent mismatch. Only asserted with a confident single-phase
+    reading while charging, so a ramping car does not raise a false alarm.
     """
-    if not charging:
+    if not charging or not requested_3p:
         return False
-    configured_3p = phase_switch_raw == 1
-    measured_1p = l1 >= PHASE_MEASURE_ON_A and l2 < PHASE_MEASURE_OFF_A and l3 < PHASE_MEASURE_OFF_A
-    return configured_3p and measured_1p
+    return l1 >= PHASE_MEASURE_ON_A and l2 < PHASE_MEASURE_OFF_A and l3 < PHASE_MEASURE_OFF_A
+
+
+def is_three_phase_install(configured: str | None, reported_404: int | None) -> bool:
+    """Whether the wallbox is wired for 3 phases.
+
+    Register 404 alone is ambiguous: 0 means both "genuinely 1-phase installed"
+    and "3-phase charger stuck at 1-phase". So an explicit user setting wins,
+    and 404 only provides the default before the user has answered.
+    """
+    if configured is not None:
+        return configured == GRID_PHASES_3
+    return reported_404 != 0
 
 
 def derive_charger_state(
