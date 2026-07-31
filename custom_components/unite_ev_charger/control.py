@@ -9,6 +9,7 @@ HA-aware controller; this module only does the math.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 from .const import (
     MODE_FAST,
@@ -177,6 +178,15 @@ def mode_target_a(
     if mode in (MODE_SOLAR, MODE_MIN_SOLAR):
         return solar_target_a(mode, surplus_w, surplus_valid, phases, voltage, limits)
     return 0.0
+
+
+def plausible_current(value: float, max_abs: float) -> bool:
+    """Whether a signed current reading is finite and physically plausible.
+
+    Guards DLB against NaN/inf and garbage values: treating those as headroom
+    would let the car draw through the main fuse.
+    """
+    return isfinite(value) and abs(value) <= max_abs
 
 
 def dlb_cap_a(

@@ -149,6 +149,15 @@ PHASE_RECOVERY_SETTLE_S: Final = 3  # brief settle before re-energising after th
 PHASE_MEASURE_ON_A: Final = 3.0
 PHASE_MEASURE_OFF_A: Final = 2.0
 
+# --- DLB input health -------------------------------------------------------
+# DLB exists to protect the main fuse, so it must fail closed: a grid-current
+# sensor that has not reported for this long is treated as unknown rather than
+# trusted. Generous enough not to trip on sensors that only publish on change,
+# tight enough to catch a dead one.
+DLB_SENSOR_MAX_AGE_S: Final = 300
+# Readings above max(this, 2x the main fuse) are implausible for a grid phase.
+DLB_PLAUSIBLE_CURRENT_FLOOR_A: Final = 100.0
+
 # Recovery status values (also used as translation keys for the diagnostic sensor).
 RECOVERY_IDLE: Final = "idle"
 RECOVERY_OBSERVING: Final = "observing_3p"

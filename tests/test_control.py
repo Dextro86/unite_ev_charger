@@ -123,6 +123,25 @@ def test_mode_target_fast_and_manual():
 
 
 # --- DLB --------------------------------------------------------------------
+def test_plausible_current_rejects_garbage():
+    # DLB must not treat NaN/inf or absurd values as available headroom.
+    assert C.plausible_current(12.5, 100.0) is True
+    assert C.plausible_current(-12.5, 100.0) is True   # export is signed, still valid
+    assert C.plausible_current(0.0, 100.0) is True
+    assert C.plausible_current(float("nan"), 100.0) is False
+    assert C.plausible_current(float("inf"), 100.0) is False
+    assert C.plausible_current(99999.0, 100.0) is False
+    assert C.plausible_current(-99999.0, 100.0) is False
+
+
+def test_dlb_cap_zero_pauses_charging():
+    # A cap of 0 (what we now return when inputs are untrustworthy) must pause,
+    # not fall through to the requested target.
+    assert C.finalize_a(16, dlb_cap=0.0, limits=LIMITS,
+                        charging_enabled=True, vehicle_connected=True) == 0
+
+
+
 def test_dlb_cap_single_phase_example():
     # fuse 25, margin 0, grid 18 A (10 house + 8 car), car 8 A -> room 15 A
     assert C.dlb_cap_a(25, 0, [18.0], [8.0]) == 15.0

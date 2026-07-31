@@ -57,6 +57,8 @@ from .const import (
     DEFAULT_PHASE_RECOVERY_ENABLED,
     DEFAULT_PHASE_RECOVERY_OBSERVE_S,
     DEFAULT_PHASE_SWITCH_DWELL_S,
+    DLB_PLAUSIBLE_CURRENT_FLOOR_A,
+    DLB_SENSOR_MAX_AGE_S,
     DEFAULT_PHASE_PREFERENCE,
     DEFAULT_PHASE_SWITCHING,
     METER_DSMR,
@@ -188,6 +190,7 @@ class ChargeControl:
         self._recovery_remaining_s: int = 0
         self._recovery_attempted: bool = False   # latch: one escalation per 3P request
         self._buffer_commands: bool = False       # hold evcc's writes during the pause
+        self._dlb_block_reason: str | None = None
         self._last_recovery_at: datetime | None = None
         self._last_recovery_result: str | None = None
         # evcc-facing intent (what evcc last asked). The entities report this so
@@ -678,27 +681,51 @@ class ChargeControl:
         return 0.0, False
 
     def _dlb_cap(self, data: WallboxData) -> float | None:
+        """The DLB ceiling, or 0 A when the inputs cannot be trusted.
+
+        DLB's only job is to keep every phase under the main fuse, so it must
+        fail CLOSED: missing, stale or implausible grid data is not evidence of
+        available headroom. Every sensor the user configured must produce a
+        fresh, plausible reading - a partial picture could hand out room on a
+        phase we cannot see.
+        """
         if not self.cfg.dlb_enabled:
             return None
         pairs = (
-            (self.cfg.dlb_l1, data.current_l1_a),
-            (self.cfg.dlb_l2, data.current_l2_a),
-            (self.cfg.dlb_l3, data.current_l3_a),
+            (self.cfg.dlb_l1, data.current_l1_a, "L1"),
+            (self.cfg.dlb_l2, data.current_l2_a, "L2"),
+            (self.cfg.dlb_l3, data.current_l3_a, "L3"),
         )
+        configured = [(sid, amps, name) for sid, amps, name in pairs if sid]
+        if not configured:
+            return self._dlb_blocked("no grid-current sensor is configured")
+
+        plausible_max = max(DLB_PLAUSIBLE_CURRENT_FLOOR_A, self.cfg.main_fuse_a * 2.0)
         grid_a: list[float] = []
         charger_a: list[float] = []
-        for sensor_id, charger_current in pairs:
-            if not sensor_id:
-                continue
-            amps = read_current_a(self.hass, sensor_id)
+        for sensor_id, charger_current, name in configured:
+            amps = read_current_a(self.hass, sensor_id, max_age_s=DLB_SENSOR_MAX_AGE_S)
             if amps is None:
-                continue
+                return self._dlb_blocked(f"{name} grid-current sensor is unavailable or stale")
+            if not ctrl.plausible_current(amps, plausible_max):
+                return self._dlb_blocked(f"{name} grid current is implausible ({amps} A)")
             grid_a.append(amps)
             charger_a.append(charger_current)
-        if not grid_a:
-            _LOGGER.debug("DLB enabled but no usable grid current sensor; not capping")
-            return None
+
+        self._dlb_clear()
         return ctrl.dlb_cap_a(self.cfg.main_fuse_a, self.cfg.dlb_margin_a, grid_a, charger_a)
+
+    def _dlb_blocked(self, reason: str) -> float:
+        """Pause charging (0 A) and log the reason once per transition."""
+        if self._dlb_block_reason != reason:
+            _LOGGER.warning("Load balancing paused charging: %s", reason)
+            self._dlb_block_reason = reason
+        return 0.0
+
+    def _dlb_clear(self) -> None:
+        if self._dlb_block_reason is not None:
+            _LOGGER.info("Load balancing inputs healthy again; resuming")
+            self._dlb_block_reason = None
 
     def _smooth(self, surplus_w: float) -> float:
         now = monotonic()

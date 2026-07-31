@@ -52,6 +52,7 @@ async def async_get_config_entry_diagnostics(
             "manual_current": controller.manual_current,
             "computed_setpoint": controller.computed_setpoint,
             "available_surplus_w": controller.available_surplus_w,
+            "dlb_block_reason": controller._dlb_block_reason,
             "recovery_status": controller.recovery_status,
             "recovery_active": controller.recovery_active,
             "recovery_remaining_s": controller.recovery_remaining_s,

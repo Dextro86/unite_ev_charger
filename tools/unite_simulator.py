@@ -66,7 +66,9 @@ class UniteState:
         self._set_string(190, "Webasto", 10)
         self._set_string(210, "Unite", 5)
         self._set_string(230, "1.2.3-sim", 50)
-        self.input[404] = 3
+        # Phase capability per spec: 0 = 1-phase, 1 = 3-phase - NOT a phase count.
+        # Confirmed on real hardware: a 3-phase charger reports 1 here.
+        self.input[404] = 1
         self.input[1102] = MIN_A   # min hw current
         self.input[1106] = 32      # cable max current
         for v_addr in (1014, 1016, 1018):
