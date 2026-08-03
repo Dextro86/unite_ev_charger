@@ -754,6 +754,15 @@ class ChargeControl:
         self._charge_started = None
         return 0
 
+    def invalidate_setpoint_cache(self) -> None:
+        """Forget what we last wrote to register 5004.
+
+        Call this whenever something outside the control loop may have changed
+        the charger's current limit (a web-UI action, a reconnect), so the next
+        cycle rewrites it instead of assuming the charger still has our value.
+        """
+        self._last_setpoint = None
+
     async def _write_setpoint(self, setpoint: int) -> None:
         # Quiet period right after a phase switch: leave the current setpoint
         # alone so the wallbox can finish its internal CP interruption. The

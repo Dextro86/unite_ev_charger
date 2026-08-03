@@ -93,3 +93,12 @@ def test_dlb_disabled_means_no_cap_at_all():
     opts = {**OPTIONS, "dlb_enabled": False}
     ctl = _control({}, options=opts)
     assert ctl._dlb_cap(_data()) is None
+
+
+def test_invalidate_setpoint_cache_forces_a_rewrite():
+    """After a web-UI action the charger forgets 5004, but we still cache what we
+    last wrote - so the loop would skip the write and leave the car at 0 A."""
+    ctl = _control({"sensor.l1": "10", "sensor.l2": "10", "sensor.l3": "10"})
+    ctl._last_setpoint = 16
+    ctl.invalidate_setpoint_cache()
+    assert ctl._last_setpoint is None

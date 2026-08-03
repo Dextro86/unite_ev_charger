@@ -144,3 +144,12 @@ class UnitePhaseRestoreButton(UniteEntity, ButtonEntity):
             self._busy_until = 0.0
             raise HomeAssistantError(f"Could not restore 3-phase config: {err}") from err
         _LOGGER.info("3-phase config restore requested via %s", route)
+        # The toggle went over the web UI, so the control loop never saw it. The
+        # charger drops its charge current (5004) on that config change, while we
+        # still cache the value we last wrote - so without this the loop would
+        # think the setpoint is already applied and never rewrite it, leaving a
+        # plugged-in car at 0 A. Force a rewrite on the next cycle.
+        controller = self.coordinator.controller
+        if controller is not None:
+            controller.invalidate_setpoint_cache()
+        await self.coordinator.async_request_refresh()
