@@ -212,6 +212,12 @@ PHASE_RESTORE_COOLDOWN_S: Final = 60  # blocks re-press while the 0->1 toggle ru
 # 1-phase installation apart from a 3-phase charger stuck at 1-phase, so the
 # phase-config restore is gated on this explicit setting. Defaults to what the
 # charger reports at setup; the user can correct it.
+# Automatically re-sync the installation phase config when the charger is found
+# stuck on 1-phase, at unplug - the only moment there is no session to break.
+# Opt-in: it writes an installation setting over the charger's web UI.
+CONF_PHASE_RESTORE_ON_UNPLUG: Final = "phase_restore_on_unplug"
+DEFAULT_PHASE_RESTORE_ON_UNPLUG: Final = False
+
 CONF_GRID_PHASES: Final = "grid_phases"
 GRID_PHASES_1: Final = "1"
 GRID_PHASES_3: Final = "3"

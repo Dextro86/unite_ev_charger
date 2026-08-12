@@ -6,24 +6,37 @@ handful of Modbus transactions every poll interval, instead of dozens.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import registers as R
 from .const import (
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
+    CONF_GRID_PHASES,
+    CONF_HOST,
+    CONF_PHASE_RESTORE_ON_UNPLUG,
     CONF_POLL_INTERVAL,
+    CONF_REST_ENABLED,
+    CONF_REST_PASSWORD,
+    CONF_REST_USERNAME,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
+    DEFAULT_PHASE_RESTORE_ON_UNPLUG,
     DEFAULT_POLL_INTERVAL,
+    DEFAULT_REST_ENABLED,
+    DEFAULT_REST_USERNAME,
     DOMAIN,
 )
+from . import control as ctrl
 from .control import effective_poll_interval
+from .rest_client import UniteRestError, async_restore_three_phase
 from .modbus import WebastoModbus, WebastoModbusError
 from .models import DeviceInfo, WallboxData, apply_session, parse_telemetry
 from .safety import program_failsafe, write_heartbeat
@@ -44,6 +57,9 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         self.client = client
         self.device = DeviceInfo()
         self.controller = None  # wired in once control is built
+        self._vehicle_was_connected = False
+        self._auto_restore_task: asyncio.Task | None = None
+        self.last_auto_phase_restore: datetime | None = None
         # monotonic deadline until which a web-UI reboot is considered in
         # progress (set by the restart button); drives the 'restarting' state.
         self.rest_restart_until: float | None = None
@@ -134,6 +150,8 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                 except WebastoModbusError:
                     data.session_rfid = None
 
+            self._maybe_auto_restore_phase(data)
+
             # First connect or a reconnect after the wallbox dropped us: the
             # Unite resets its failsafe + charging-current registers on every new
             # Modbus connection, so re-assert ownership before the heartbeat.
@@ -161,6 +179,56 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             return data
         except WebastoModbusError as err:
             raise UpdateFailed(str(err)) from err
+
+    def _maybe_auto_restore_phase(self, data: WallboxData) -> None:
+        """Re-sync a stuck 1-phase config at unplug, if the user opted in.
+
+        The web-UI toggle that fixes this breaks the running charging session, so
+        the only free moment is right after the vehicle is unplugged: the next
+        plug-in then starts with the config already correct. Only fires when the
+        charger really is stuck (register 404 reads 0) on an installation the
+        user declared as 3-phase - on a genuine 1-phase wallbox 404 = 0 is
+        correct and must be left alone.
+        """
+        connected = data.vehicle_connected
+        just_unplugged = self._vehicle_was_connected and not connected
+        self._vehicle_was_connected = connected
+        if not just_unplugged:
+            return
+        o = self.entry.options
+        if not o.get(CONF_PHASE_RESTORE_ON_UNPLUG, DEFAULT_PHASE_RESTORE_ON_UNPLUG):
+            return
+        if not o.get(CONF_REST_ENABLED, DEFAULT_REST_ENABLED):
+            return
+        if data.phase_capability_raw != 0:
+            return  # not stuck
+        if not ctrl.is_three_phase_install(o.get(CONF_GRID_PHASES), data.phase_capability_raw):
+            return  # genuinely 1-phase (or unanswered) -> never write a 3-phase config
+        if self._auto_restore_task is not None and not self._auto_restore_task.done():
+            return
+        self._auto_restore_task = self.hass.async_create_task(self._async_auto_restore_phase())
+
+    async def _async_auto_restore_phase(self) -> None:
+        o = self.entry.options
+        try:
+            route = await async_restore_three_phase(
+                async_get_clientsession(self.hass),
+                self.entry.data[CONF_HOST],
+                o.get(CONF_REST_USERNAME, DEFAULT_REST_USERNAME),
+                o.get(CONF_REST_PASSWORD, ""),
+            )
+        except UniteRestError as err:
+            _LOGGER.warning(
+                "Charger is stuck on 1-phase, but the automatic restore failed: %s", err
+            )
+            return
+        self.last_auto_phase_restore = datetime.now(timezone.utc)
+        _LOGGER.info(
+            "Vehicle unplugged with the charger stuck on 1-phase; restored the "
+            "3-phase config via %s",
+            route,
+        )
+        await self.async_request_refresh()
 
     async def _on_new_connection(self, data: WallboxData) -> None:
         """Run the ownership handshake the wallbox expects on a fresh connection.

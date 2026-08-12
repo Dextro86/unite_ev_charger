@@ -46,6 +46,7 @@ from .const import (
     CONF_METER_MODEL,
     CONF_MIN_CURRENT,
     CONF_NOMINAL_VOLTAGE,
+    CONF_PHASE_RESTORE_ON_UNPLUG,
     CONF_PHASE_RECOVERY_DWELL,
     CONF_PHASE_RECOVERY_ENABLED,
     CONF_PHASE_RECOVERY_OBSERVE,
@@ -68,6 +69,7 @@ from .const import (
     DEFAULT_MAX_CURRENT_A,
     DEFAULT_MIN_CURRENT_A,
     DEFAULT_MODE,
+    DEFAULT_PHASE_RESTORE_ON_UNPLUG,
     DEFAULT_PHASE_RECOVERY_DWELL_S,
     DEFAULT_PHASE_RECOVERY_ENABLED,
     DEFAULT_PHASE_RECOVERY_OBSERVE_S,
@@ -394,6 +396,9 @@ class UniteOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_PHASE_RECOVERY_DWELL, default=DEFAULT_PHASE_RECOVERY_DWELL_S
                 ): _num(60, 300, 1, "s"),
+                vol.Required(
+                    CONF_PHASE_RESTORE_ON_UNPLUG, default=DEFAULT_PHASE_RESTORE_ON_UNPLUG
+                ): bool,
             }
         )
         return self.async_show_form(
