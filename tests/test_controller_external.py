@@ -49,12 +49,26 @@ def test_is_external():
 
 
 def test_apply_writes_nothing_in_external_mode():
+    """Passive: no control decisions of our own once a session is under way."""
     ctl, client = _ext_control()
     data = WallboxData()
     data.charge_point_state_raw = 2  # charging
     data.cable_state_raw = 2
+    ctl._was_connected = True  # not a fresh session
     asyncio.run(ctl.async_apply(data))
-    assert client.writes == []  # passive: no setpoint writes
+    assert client.writes == []
+
+
+def test_external_reasserts_zero_when_a_session_starts():
+    """Plugging in makes the wallbox apply its own (minimum) charge current, so a
+    new session must re-assert what the controller wants - 0 A while evcc has
+    asked for nothing, otherwise the car starts charging by itself."""
+    ctl, client = _ext_control()
+    data = WallboxData()
+    data.charge_point_state_raw = 2
+    data.cable_state_raw = 2  # vehicle just connected (_was_connected is False)
+    asyncio.run(ctl.async_apply(data))
+    assert client.writes == [("set_current_a", 0)]
 
 
 def test_external_set_current_clamps_to_register_range():

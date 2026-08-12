@@ -206,3 +206,21 @@ def test_setpoint_held_during_quiet_then_resumes():
     held, after = asyncio.run(run())
     assert held == []                          # no 5004 write during quiet period
     assert ("set_current_a", 10) in after      # resumes after the quiet period
+
+
+def test_plugging_in_rewrites_zero_when_charging_is_switched_off():
+    """Reported bug: with Charging off, plugging in made the car charge at the
+    wallbox minimum. The wallbox sets its own current for a new session, and our
+    cached last-setpoint (0) made the loop skip the rewrite."""
+    ctl, client = _make_control()
+    ctl.mode = "manual"
+    ctl.charging_enabled = False
+    ctl._last_setpoint = 0        # we wrote 0 while no car was attached
+    ctl._was_connected = False
+
+    data = _data(phase_switch_raw=1, state=2)  # vehicle connected + charging
+
+    asyncio.run(ctl.async_apply(data))
+
+    # 0 A must be written again, even though the target did not change
+    assert ("set_current_a", 0) in client.writes

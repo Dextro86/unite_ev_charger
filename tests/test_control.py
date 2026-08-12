@@ -201,3 +201,28 @@ def test_is_three_phase_install():
     assert C.is_three_phase_install(None, 1) is True
     assert C.is_three_phase_install(None, 0) is False  # genuine 1-phase install
     assert C.is_three_phase_install(None, None) is True  # unknown -> assume 3P default
+
+
+# --- automatic 3-phase config restore ---------------------------------------
+def _restore(**over):
+    base = dict(
+        enabled=True, rest_enabled=True, vehicle_connected=False,
+        phase_capability_raw=0, grid_phases="3", attempts=0, max_attempts=3,
+    )
+    base.update(over)
+    return C.should_restore_phase_config(**base)
+
+
+def test_should_restore_phase_config():
+    assert _restore() is True                                # idle + stuck + declared 3P
+    assert _restore(enabled=False) is False                  # opt-in is off
+    assert _restore(rest_enabled=False) is False             # no web-UI login
+    assert _restore(vehicle_connected=True) is False         # never mid-session
+    assert _restore(phase_capability_raw=1) is False         # not stuck
+    assert _restore(phase_capability_raw=None) is False      # unknown -> leave alone
+    # a genuine 1-phase wallbox: 404 = 0 is correct there, never write 3-phase
+    assert _restore(grid_phases="1") is False
+    assert _restore(grid_phases=None) is False               # unanswered -> ambiguous
+    # attempt cap stops a charger that refuses to keep the setting
+    assert _restore(attempts=2) is True
+    assert _restore(attempts=3) is False

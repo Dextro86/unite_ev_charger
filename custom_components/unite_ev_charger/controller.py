@@ -486,10 +486,19 @@ class ChargeControl:
     async def async_apply(self, data: WallboxData) -> None:
         connected = data.vehicle_connected
         just_disconnected = self._was_connected and not connected
+        just_connected = connected and not self._was_connected
         self._was_connected = connected
         # A fresh session re-arms recovery (both modes).
         if just_disconnected:
             self._recovery_attempted = False
+        # Plugging in starts a new session and the wallbox sets its own charge
+        # current for it (its hardware minimum). Our cached "last written"
+        # setpoint is therefore stale: without this, a target that happens to be
+        # unchanged - notably 0 A while charging is switched off - would be
+        # skipped as "already applied" and the car would charge at the wallbox's
+        # minimum with the Charging switch still off.
+        if just_connected:
+            await self._reassert_current_on_reconnect()
 
         # External control (evcc): stay passive. The heartbeat keeps running in
         # the coordinator, so the wallbox does not drop to its failsafe.

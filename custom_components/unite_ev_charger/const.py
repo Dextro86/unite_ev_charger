@@ -215,6 +215,12 @@ PHASE_RESTORE_COOLDOWN_S: Final = 60  # blocks re-press while the 0->1 toggle ru
 # Automatically re-sync the installation phase config when the charger is found
 # stuck on 1-phase, at unplug - the only moment there is no session to break.
 # Opt-in: it writes an installation setting over the charger's web UI.
+# Retry pacing for the automatic restore: the "idle and stuck" condition stays
+# true until it is fixed, so without a floor we would hammer the web UI every
+# poll. Give up after a few tries; plugging a vehicle in re-arms it.
+PHASE_RESTORE_RETRY_S: Final = 900          # 15 min between attempts
+PHASE_RESTORE_MAX_ATTEMPTS: Final = 3
+
 CONF_PHASE_RESTORE_ON_UNPLUG: Final = "phase_restore_on_unplug"
 DEFAULT_PHASE_RESTORE_ON_UNPLUG: Final = False
 
