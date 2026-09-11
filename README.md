@@ -317,7 +317,7 @@ chargers:
     voltageL2: sensor.unite_ev_charger_voltage_l2
     voltageL3: sensor.unite_ev_charger_voltage_l3
     # optional 1p/3p phase switching:
-    phaseswitch: select.unite_ev_charger_phase_select
+    phaseswitch: select.unite_ev_charger_phase_preference
 ```
 
 The IDs above are what a single charger gets. If you added a **second** charger,
@@ -335,7 +335,7 @@ Full entity reference:
 | `energy` | `sensor.unite_ev_charger_meter_energy` |
 | `currentL1` / `L2` / `L3` | `sensor.unite_ev_charger_current_l1` / `_l2` / `_l3` |
 | `voltageL1` / `L2` / `L3` | `sensor.unite_ev_charger_voltage_l1` / `_l2` / `_l3` |
-| `phaseswitch` | `select.unite_ev_charger_phase_select` |
+| `phaseswitch` | `select.unite_ev_charger_phase_preference` |
 
 The heartbeat keeps running so the wallbox never drops to failsafe; evcc owns all
 charging decisions. Mode/Solar/DLB entities are unavailable in this mode.
@@ -444,7 +444,7 @@ phases1p3p:
   headers:
     - Authorization: Bearer <TOKEN>
     - Content-Type: application/json
-  body: '{"entity_id": "select.unite_ev_charger_phase_select", "value": "${phases1p3p}"}'
+  body: '{"entity_id": "select.unite_ev_charger_phase_preference", "value": "${phases1p3p}"}'
 tos: true
 ```
 
