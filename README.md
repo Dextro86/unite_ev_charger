@@ -444,7 +444,7 @@ phases1p3p:
   headers:
     - Authorization: Bearer <TOKEN>
     - Content-Type: application/json
-  body: '{"entity_id": "select.unite_ev_charger_phase_select", "value": "${phases1p3p}"}'
+  body: '{"entity_id": "select.unite_ev_charger_phase_select", "option": "${phases1p3p}"}'
 tos: true
 ```
 
