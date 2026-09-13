@@ -194,7 +194,7 @@
           "dlb": "Dynamic Load Balancing (DLB)",
           "solar": "Solar",
           "advanced": "Advanced",
-          "reboot": "Restart (web UI)",
+          "reboot": "Web UI",
           "save": "Save & close"
         }
       },
