@@ -43,7 +43,12 @@ from .const import (
 )
 from . import control as ctrl
 from .control import effective_poll_interval
-from .rest_client import UniteRestError, async_restore_three_phase
+from .rest_client import (
+    UnitePhpRestClient,
+    UniteRestError,
+    async_restore_three_phase,
+    async_set_lockable_cable,
+)
 from .modbus import WebastoModbus, WebastoModbusError
 from .models import DeviceInfo, WallboxData, apply_session, parse_telemetry
 from .safety import capture_baseline, program_failsafe, restore_baseline, write_heartbeat
@@ -70,6 +75,9 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         self._baseline_store = Store(hass, 1, f"{DOMAIN}_baseline_{entry.entry_id}")
         self._baseline: dict[str, int | None] | None = None
         self._baseline_loaded = False
+        # Lockable-cable installation setting (web UI). None = unknown
+        # (no web UI login, or the firmware lacks the setting).
+        self.lockable_cable: bool | None = None
         self.last_auto_phase_restore: datetime | None = None
         # monotonic deadline until which a web-UI reboot is considered in
         # progress (set by the restart button); drives the 'restarting' state.
@@ -134,22 +142,22 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             data = parse_telemetry(telemetry)
             apply_session(data, session)
 
-            try:
-                data.set_current_a = int(await self.client.read_register(R.SET_CURRENT_A))
-            except WebastoModbusError:
-                data.set_current_a = None
-            try:
-                data.phase_switch_raw = int(await self.client.read_register(R.PHASE_SWITCH))
-            except WebastoModbusError:
-                data.phase_switch_raw = None
+            # Single optional reads: best-effort, never drop the connection. A
+            # failed probe costs one request, not a reconnect storm; a genuine
+            # outage still surfaces through the block reads above.
+            result = await self.client.try_read_optional(R.SET_CURRENT_A)
+            data.set_current_a = int(result.value) if result.value is not None else None
+            result = await self.client.try_read_optional(R.PHASE_SWITCH)
+            data.phase_switch_raw = int(result.value) if result.value is not None else None
             # Re-read the phase capability (404) every cycle: a Unite can report
             # it wrong while booting, so a single setup read could permanently
             # (until reload) disable phase switching. Self-heal here; keep the
             # last good value on a failed read.
-            try:
-                data.phase_capability_raw = int(await self.client.read_register(R.NUMBER_OF_PHASES))
+            result = await self.client.try_read_optional(R.NUMBER_OF_PHASES)
+            if result.value is not None:
+                data.phase_capability_raw = int(result.value)
                 self.device.phases_supported = data.phase_capability_raw
-            except WebastoModbusError:
+            else:
                 data.phase_capability_raw = self.device.phases_supported
             # Session RFID tag: only meaningful while a vehicle is connected, and
             # absent on firmware older than spec v1.9. Probed once per connection
@@ -329,6 +337,63 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         )
         if self.controller is not None:
             await self.controller.async_on_reconnect(data.phase_switch_raw)
+
+    def _webconfig_client(self) -> UnitePhpRestClient | None:
+        """Webconfig client when the web UI login is configured, else None."""
+        o = self.entry.options
+        if not o.get(CONF_REST_ENABLED, DEFAULT_REST_ENABLED):
+            return None
+        return UnitePhpRestClient(
+            self.entry.data.get(CONF_HOST, ""),
+            o.get(CONF_REST_USERNAME, DEFAULT_REST_USERNAME),
+            o.get(CONF_REST_PASSWORD, ""),
+        )
+
+    async def async_refresh_lockable_cable(self) -> None:
+        """Read the lockable-cable installation setting (best effort)."""
+        client = self._webconfig_client()
+        if client is None:
+            return
+        try:
+            value = await client.get_lockable_cable()
+        except UniteRestError as err:
+            _LOGGER.debug("Could not read lockable-cable setting: %s", err)
+            return
+        if value is not None and value != self.lockable_cable:
+            self.lockable_cable = value
+            self.async_update_listeners()
+
+    async def async_set_lockable_cable(self, enabled: bool) -> None:
+        """Write the lockable-cable setting and verify by read-back.
+
+        Writes prefer the JSON config API with webconfig fallback; verification
+        reads back over webconfig (the JSON API has no read endpoint). When no
+        read-back is possible, the acknowledged write stands.
+        """
+        o = self.entry.options
+        if not o.get(CONF_REST_ENABLED, DEFAULT_REST_ENABLED):
+            raise UniteRestError("Web UI login is not configured")
+        route = await async_set_lockable_cable(
+            async_get_clientsession(self.hass),
+            self.entry.data.get(CONF_HOST, ""),
+            o.get(CONF_REST_USERNAME, DEFAULT_REST_USERNAME),
+            o.get(CONF_REST_PASSWORD, ""),
+            enabled,
+        )
+        value: bool | None = None
+        php = self._webconfig_client()
+        if php is not None:
+            try:
+                value = await php.get_lockable_cable()
+            except UniteRestError as err:
+                _LOGGER.debug("Could not verify the lockable-cable setting: %s", err)
+        if value is None:
+            _LOGGER.debug("Set lockable cable via %s without read-back", route)
+            value = enabled
+        self.lockable_cable = value
+        self.async_update_listeners()
+        if value != enabled:
+            raise UniteRestError("Charger did not take the lockable-cable setting")
 
     async def async_restore_baseline_on_exit(self) -> None:
         """Write the captured pre-integration values back (best effort).

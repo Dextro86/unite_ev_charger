@@ -129,6 +129,9 @@
       "vehicle_connected": {
         "name": "Vehicle connected"
       },
+      "cable_locked": {
+        "name": "Cable locked"
+      },
       "charging": {
         "name": "Charging"
       },
@@ -145,6 +148,9 @@
     "switch": {
       "charging": {
         "name": "Charging"
+      },
+      "lockable_cable": {
+        "name": "Lockable cable"
       }
     },
     "select": {

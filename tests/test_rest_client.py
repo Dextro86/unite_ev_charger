@@ -16,9 +16,11 @@ from uec.rest_client import (
     UniteRestAuthError,
     UniteRestEndpointMissing,
     UniteRestError,
+    _LOCKABLE_FIELD,
     async_build_rest_client,
     async_restart_charger,
     async_restore_three_phase,
+    async_set_lockable_cable,
 )
 
 
@@ -336,3 +338,110 @@ def test_restore_three_phase_falls_back_to_webconfig(monkeypatch):
     )
     assert route == "webconfig"
     assert calls == [0, 1]  # toggle ran on the webconfig client
+
+
+# --- lockable cable over webconfig -------------------------------------------
+_LOCKABLE_PAGE = (
+    '<input type="hidden" name="token" value="abcdef123456">'
+    '<select name="lockableCableSelection">'
+    '<option value="0">Uitgeschakeld</option>'
+    '<option value="1" selected="selected">Ingeschakeld</option>'
+    "</select>"
+)
+_LOCKABLE_PAGE_OFF = (
+    '<input type="hidden" name="token" value="abcdef123456">'
+    '<select name="lockableCableSelection">'
+    '<option value="0" selected="selected">Uitgeschakeld</option>'
+    '<option value="1">Ingeschakeld</option>'
+    "</select>"
+)
+
+
+class FakePhpSession:
+    """Fake webconfig session: GET returns the page, POST records the form."""
+
+    def __init__(self, page_html: str, post_status: int = 302) -> None:
+        self._page_html = page_html
+        self._post_status = post_status
+        self.posts: list[tuple[str, dict]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def get(self, url, **kwargs):
+        return FakeResp(200, text=self._page_html)
+
+    def post(self, url, **kwargs):
+        self.posts.append((url, kwargs.get("data", {})))
+        return FakeResp(self._post_status)
+
+
+def _php_client(monkeypatch, page_html: str, post_status: int = 302) -> tuple:
+    session = FakePhpSession(page_html, post_status)
+    monkeypatch.setattr(UnitePhpRestClient, "_new_session", lambda self: session)
+    return UnitePhpRestClient("10.0.0.5", "admin", "secret"), session
+
+
+def test_php_get_lockable_cable_on(monkeypatch):
+    client, _ = _php_client(monkeypatch, _LOCKABLE_PAGE)
+    assert asyncio.run(client.get_lockable_cable()) is True
+
+
+def test_php_get_lockable_cable_off(monkeypatch):
+    client, _ = _php_client(monkeypatch, _LOCKABLE_PAGE_OFF)
+    assert asyncio.run(client.get_lockable_cable()) is False
+
+
+def test_php_get_lockable_cable_absent(monkeypatch):
+    client, _ = _php_client(monkeypatch, "<html>no such setting</html>")
+    assert asyncio.run(client.get_lockable_cable()) is None
+
+
+def test_php_set_lockable_cable_posts_form(monkeypatch):
+    client, session = _php_client(monkeypatch, _LOCKABLE_PAGE_OFF)
+    asyncio.run(client.set_lockable_cable(True))
+    assert len(session.posts) == 2  # login POST + settings POST
+    url, form = session.posts[1]
+    assert url == "http://10.0.0.5/index_main.php"
+    assert form["token"] == "abcdef123456"
+    assert form["lockableCableSelection"] == "1"
+    assert form["button_lockable_cable"] == "Submit Query"
+
+
+def test_php_set_lockable_cable_bad_status_raises(monkeypatch):
+    client, _ = _php_client(monkeypatch, _LOCKABLE_PAGE, post_status=500)
+    with pytest.raises(UniteRestError):
+        asyncio.run(client.set_lockable_cable(False))
+
+
+def test_php_lockable_cable_bad_credentials_raise(monkeypatch):
+    client, _ = _php_client(monkeypatch, _LOGIN_FORM)
+    with pytest.raises(UniteRestAuthError):
+        asyncio.run(client.get_lockable_cable())
+
+
+def test_set_lockable_cable_prefers_json():
+    session = RestoreSession({443})
+    route = asyncio.run(
+        async_set_lockable_cable(session, "10.0.0.5", "admin", "x", True)
+    )
+    assert route == "json:443"
+    assert session.config_posts == [[{"fieldKey": _LOCKABLE_FIELD, "value": 1}]]
+
+
+def test_set_lockable_cable_falls_back_to_webconfig(monkeypatch):
+    calls: list[bool] = []
+
+    async def fake_php_set(self, enabled):
+        calls.append(enabled)
+
+    monkeypatch.setattr(UnitePhpRestClient, "set_lockable_cable", fake_php_set)
+    session = RestoreSession({443}, config_status=404, webconfig_body=_LOGIN_FORM)
+    route = asyncio.run(
+        async_set_lockable_cable(session, "10.0.0.5", "admin", "x", False)
+    )
+    assert route == "webconfig"
+    assert calls == [False]

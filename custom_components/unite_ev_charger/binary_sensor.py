@@ -44,6 +44,12 @@ BINARY_SENSORS: tuple[UniteBinaryDescription, ...] = (
         value_fn=lambda c: c.data.vehicle_connected,
     ),
     UniteBinaryDescription(
+        key="cable_locked",
+        translation_key="cable_locked",
+        icon="mdi:lock",
+        value_fn=lambda c: c.data.cable_state_raw == 3,
+    ),
+    UniteBinaryDescription(
         key="charging",
         translation_key="charging",
         device_class=BinarySensorDeviceClass.BATTERY_CHARGING,

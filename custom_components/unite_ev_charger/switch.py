@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN
+from .const import CONF_REST_ENABLED, DEFAULT_REST_ENABLED, DOMAIN
 from .coordinator import WebastoCoordinator
 from .entity import UniteEntity
 
@@ -18,7 +18,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: WebastoCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([UniteChargingSwitch(coordinator)])
+    async_add_entities([UniteChargingSwitch(coordinator), UniteLockableCableSwitch(coordinator)])
 
 
 class UniteChargingSwitch(UniteEntity, SwitchEntity, RestoreEntity):
@@ -69,3 +69,35 @@ class UniteChargingSwitch(UniteEntity, SwitchEntity, RestoreEntity):
             and not self.coordinator.controller.is_external
         ):
             self.coordinator.controller.charging_enabled = last.state == "on"
+
+
+class UniteLockableCableSwitch(UniteEntity, SwitchEntity):
+    """Whether the cable may lock (installation setting over the web UI)."""
+
+    _attr_translation_key = "lockable_cable"
+
+    def __init__(self, coordinator: WebastoCoordinator) -> None:
+        super().__init__(coordinator, "lockable_cable")
+
+    def _rest_enabled(self) -> bool:
+        return bool(
+            self.coordinator.entry.options.get(CONF_REST_ENABLED, DEFAULT_REST_ENABLED)
+        )
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self._rest_enabled()
+            and self.coordinator.lockable_cable is not None
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.coordinator.lockable_cable
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self.coordinator.async_set_lockable_cable(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self.coordinator.async_set_lockable_cable(False)

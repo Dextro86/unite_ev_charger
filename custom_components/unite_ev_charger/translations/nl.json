@@ -129,6 +129,9 @@
       "vehicle_connected": {
         "name": "Auto verbonden"
       },
+      "cable_locked": {
+        "name": "Kabel vergrendeld"
+      },
       "charging": {
         "name": "Laden"
       },
@@ -145,6 +148,9 @@
     "switch": {
       "charging": {
         "name": "Laden"
+      },
+      "lockable_cable": {
+        "name": "Vergrendelbare kabel"
       }
     },
     "select": {

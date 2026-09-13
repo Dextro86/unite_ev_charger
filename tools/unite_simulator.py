@@ -49,6 +49,11 @@ class UniteState:
         self.input: dict[int, int] = {}
         self.holding: dict[int, int] = {}
         self.last_heartbeat = time.monotonic()
+        # Registers this firmware revision does not serve: reads overlapping
+        # them answer Modbus exception 0x02 (illegal data address), like real
+        # old firmware. Entries are (function_code, address) pairs, e.g.
+        # {(3, 405)} for a wallbox without the phase-switch register.
+        self.missing: set[tuple[int, int]] = set()
         self.session_wh = 0.0
         self.meter_wh = 1234_000.0  # start with some lifetime energy
         self.session_start: float | None = None
@@ -177,6 +182,8 @@ def _process_pdu(pdu: bytes, state: UniteState) -> bytes:
         if fc in (3, 4):  # read holding / input
             addr = int.from_bytes(pdu[1:3], "big")
             qty = int.from_bytes(pdu[3:5], "big")
+            if any((fc, addr + i) in state.missing for i in range(qty)):
+                return bytes([fc | 0x80, 0x02])  # illegal data address
             store = state.holding if fc == 3 else state.input
             body = _read_block(store, addr, qty)
             return bytes([fc, len(body)]) + body

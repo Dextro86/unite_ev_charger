@@ -49,6 +49,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Read the lockable-cable installation setting once in the background; the
+    # switch stays unavailable until it is known (or when no web UI login set).
+    hass.async_create_task(coordinator.async_refresh_lockable_cable())
     entry.async_on_unload(entry.add_update_listener(_async_reload_on_update))
 
     async def _async_restore_on_stop(_event) -> None:

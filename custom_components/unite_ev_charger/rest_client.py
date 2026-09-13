@@ -56,6 +56,9 @@ class UniteRestValidationError(UniteRestError):
 # (installationSettings.currentLimiterPhase) and the webconfig
 # (currentLimiterPhaseSelection). 0 = 1-phase, 1 = 3-phase.
 _PHASE_FIELD = "installationSettings.currentLimiterPhase"
+# Lockable-cable installation setting on the JSON API (0/1). Verified live:
+# plain-int write of the current value succeeds without changing anything.
+_LOCKABLE_FIELD = "installationSettings.lockableCable"
 
 
 # --- Variant A: modern JSON API over HTTPS ----------------------------------
@@ -150,6 +153,22 @@ class UniteJsonRestClient:
             await self._post(
                 "/configuration-updates",
                 [{"fieldKey": _PHASE_FIELD, "value": {"value": value, "valueType": "selection"}}],
+            )
+
+    async def set_lockable_cable(self, value: int) -> None:
+        """Set the lockable-cable installation setting (0/1).
+
+        Same payload-shape fallback as the phase config; verified live on real
+        hardware (plain int accepted).
+        """
+        try:
+            await self._post(
+                "/configuration-updates", [{"fieldKey": _LOCKABLE_FIELD, "value": value}]
+            )
+        except UniteRestValidationError:
+            await self._post(
+                "/configuration-updates",
+                [{"fieldKey": _LOCKABLE_FIELD, "value": {"value": value, "valueType": "selection"}}],
             )
 
 
@@ -267,6 +286,38 @@ class UnitePhpRestClient:
                 ) as r:
                     if r.status not in (200, 302, 303):
                         raise UniteRestError(f"Phase config write returned status {r.status}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                raise UniteRestError(f"Cannot reach the charger web UI: {err}") from err
+
+    async def get_lockable_cable(self) -> bool | None:
+        """Read the lockable-cable installation setting; None when absent."""
+        async with self._new_session() as session:
+            html = await self._login_and_page(session)
+            value = self._selected_option(html, "lockableCableSelection")
+            if value is None:
+                return None
+            return value == "1"
+
+    async def set_lockable_cable(self, enabled: bool) -> None:
+        """Set the lockable-cable installation setting (0/1) via webconfig."""
+        async with self._new_session() as session:
+            html = await self._login_and_page(session)
+            token = self.extract_token(html)
+            if not token:
+                raise UniteRestError("Could not read the CSRF token after login")
+            form = {
+                "token": token,
+                "lockableCableSelection": "1" if enabled else "0",
+                "button_lockable_cable": "Submit Query",
+            }
+            try:
+                async with session.post(
+                    f"{self._base}/index_main.php", data=form, allow_redirects=False
+                ) as r:
+                    if r.status not in (200, 302, 303):
+                        raise UniteRestError(
+                            f"Lockable-cable write returned status {r.status}"
+                        )
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 raise UniteRestError(f"Cannot reach the charger web UI: {err}") from err
 
@@ -397,6 +448,52 @@ async def async_restore_three_phase(
         await asyncio.sleep(settle_s)
         await php.set_current_limiter_phase(1)
         _LOGGER.debug("Restored 3-phase config on %s via webconfig", host)
+        return "webconfig"
+
+    if json_endpoint_missing:
+        raise UniteRestError(
+            "The JSON API has no configuration endpoint on this firmware and no "
+            "webconfig portal was found to fall back to"
+        )
+    raise UniteRestError(
+        "No reachable web UI found (tried the JSON API on 443/4443 and the HTTP webconfig portal)"
+    )
+
+
+async def async_set_lockable_cable(
+    session: aiohttp.ClientSession,
+    host: str,
+    username: str,
+    password: str,
+    enabled: bool,
+) -> str:
+    """Set the lockable-cable installation setting (0/1).
+
+    Prefers the JSON config API where present, else the webconfig form.
+    Returns the route used. Auth failures propagate.
+    """
+    value = 1 if enabled else 0
+    json_endpoint_missing = False
+    for port in JSON_API_PORTS:
+        if not await _probe_json_api(session, host, port):
+            continue
+        client = UniteJsonRestClient(session, host, username, password, port=port)
+        try:
+            await client.set_lockable_cable(value)
+        except UniteRestEndpointMissing:
+            json_endpoint_missing = True  # login works but no config endpoint here
+            break
+        _LOGGER.debug(
+            "Set lockable cable to %s on %s via JSON API on port %s",
+            value,
+            host,
+            port,
+        )
+        return f"json:{port}"
+
+    if await _has_webconfig(session, host):
+        await UnitePhpRestClient(host, username, password).set_lockable_cable(enabled)
+        _LOGGER.debug("Set lockable cable to %s on %s via webconfig", value, host)
         return "webconfig"
 
     if json_endpoint_missing:

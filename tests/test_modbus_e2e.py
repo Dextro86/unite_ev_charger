@@ -246,3 +246,28 @@ def test_evcc_style_current_and_phase_control():
     assert three.phases_in_use == 3
     assert three.current_l1_a == 10.0
     assert one.phases_in_use == 1
+
+
+def test_optional_read_missing_register_keeps_connection():
+    """Old firmware without register 405: one clean refusal, no reconnect storm."""
+
+    async def scenario():
+        state, scn = sim.UniteState(), sim.Scenario()
+        state.missing = {(3, 405)}
+        server, port = await _serve(state, scn)
+        try:
+            client = WebastoModbus("127.0.0.1", port, unit_id=255)
+            result = await client.try_read_optional(R.PHASE_SWITCH)
+            still_connected = client.connected
+            # Mandatory reads still work on the same connection.
+            telemetry = await client.read_input_block(R.TELEMETRY_BASE, R.TELEMETRY_COUNT)
+            await client.async_close()
+            return result, still_connected, len(telemetry)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    result, still_connected, count = _run(scenario())
+    assert result.value is None and result.transport_error is False
+    assert still_connected is True
+    assert count == R.TELEMETRY_COUNT
