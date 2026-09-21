@@ -47,6 +47,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.controller = ChargeControl(hass, entry, coordinator)
     await coordinator.async_config_entry_first_refresh()
 
+    await _async_maybe_repair_unique_id(hass, entry, coordinator)
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # Read the lockable-cable installation setting once in the background; the
@@ -66,6 +68,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_restore_on_stop)
     )
     return True
+
+
+async def _async_maybe_repair_unique_id(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: WebastoCoordinator
+) -> None:
+    """One-time repair for entries created while the serial was unreadable.
+
+    Those carry "host:port" as unique_id, so a retried setup (with the real
+    serial) slips past the duplicate check and spawns a second entry/device
+    polling the same charger. Straighten to the serial once known; if the
+    serial entry already exists this one is the duplicate and the user is
+    told to remove one.
+    """
+    legacy = f"{entry.data[CONF_HOST]}:{entry.data.get(CONF_PORT, DEFAULT_PORT)}"
+    if entry.unique_id != legacy:
+        return
+    serial = str(coordinator.device.serial_number or "").strip()
+    if not serial or serial == legacy:
+        return
+    clash = [
+        e
+        for e in hass.config_entries.async_entries(DOMAIN)
+        if e.entry_id != entry.entry_id and e.unique_id == serial
+    ]
+    if clash:
+        _LOGGER.warning(
+            "Two integration entries point at the same charger (serial %s); "
+            "remove one under Settings -> Devices & Services",
+            serial,
+        )
+        return
+    hass.config_entries.async_update_entry(entry, unique_id=serial)
+    _LOGGER.info("Repaired integration entry to use the charger serial")
 
 
 async def _async_reload_on_update(hass: HomeAssistant, entry: ConfigEntry) -> None:

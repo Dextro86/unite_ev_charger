@@ -82,7 +82,7 @@
         "name": "Available solar surplus"
       },
       "control_setpoint": {
-        "name": "Control target current"
+        "name": "Target charge current"
       },
       "phases_in_use": {
         "name": "Phases in use"
@@ -110,10 +110,10 @@
         "name": "Last restart"
       },
       "register_404": {
-        "name": "Register 404"
+        "name": "Phase capability (404)"
       },
       "register_405": {
-        "name": "Register 405"
+        "name": "Phase selection (405)"
       },
       "recovery_status": {
         "name": "Phase recovery status"
@@ -130,7 +130,7 @@
         "name": "Vehicle connected"
       },
       "cable_locked": {
-        "name": "Cable locked"
+        "name": "Plug locked"
       },
       "charging": {
         "name": "Charging"
@@ -150,7 +150,7 @@
         "name": "Charging"
       },
       "lockable_cable": {
-        "name": "Lockable cable"
+        "name": "Cable locking"
       }
     },
     "select": {
@@ -185,7 +185,7 @@
         "name": "Restart"
       },
       "restore_three_phase": {
-        "name": "Restore 3-phase config"
+        "name": "Restore 3-phase setting"
       }
     }
   },

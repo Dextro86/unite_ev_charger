@@ -82,7 +82,7 @@
         "name": "Beschikbaar zonoverschot"
       },
       "control_setpoint": {
-        "name": "Regeldoel stroom"
+        "name": "Gewenste laadstroom"
       },
       "phases_in_use": {
         "name": "Fasen in gebruik"
@@ -110,10 +110,10 @@
         "name": "Laatste herstart"
       },
       "register_404": {
-        "name": "Register 404"
+        "name": "Fasemogelijkheid (404)"
       },
       "register_405": {
-        "name": "Register 405"
+        "name": "Fasekeuze (405)"
       },
       "recovery_status": {
         "name": "Fase-herstel status"
@@ -130,7 +130,7 @@
         "name": "Auto verbonden"
       },
       "cable_locked": {
-        "name": "Kabel vergrendeld"
+        "name": "Stekker vast"
       },
       "charging": {
         "name": "Laden"
@@ -150,7 +150,7 @@
         "name": "Laden"
       },
       "lockable_cable": {
-        "name": "Vergrendelbare kabel"
+        "name": "Kabelvergrendeling"
       }
     },
     "select": {
@@ -185,7 +185,7 @@
         "name": "Herstart"
       },
       "restore_three_phase": {
-        "name": "3-fase-config herstellen"
+        "name": "3-fasen-instelling herstellen"
       }
     }
   },

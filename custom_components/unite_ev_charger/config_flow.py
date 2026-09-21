@@ -9,6 +9,7 @@ used to crash the old integration.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import voluptuous as vol
@@ -161,6 +162,34 @@ def _num(minv: float, maxv: float, step: float = 1, unit: str | None = None) -> 
     )
 
 
+async def _read_serial_with_retry(client: WebastoModbus, attempts: int = 3) -> Any:
+    """Read the serial, retrying transient failures.
+
+    A charger that is still booting (or a busy Modbus link) may answer with
+    empty registers on the first read; without retries the entry falls back
+    to a host:port unique_id and a later setup slips past the duplicate check
+    and spawns a second entry/device on the same charger. Raises the last
+    error only when no attempt got any answer at all, so a charger that
+    genuinely has no serial still falls back to host:port.
+    """
+    last_err: Exception | None = None
+    answered = False
+    for attempt in range(attempts):
+        try:
+            serial = await client.read_register(R.SERIAL_NUMBER)
+        except Exception as err:  # noqa: BLE001 - retried; raised if persistent
+            last_err = err
+        else:
+            answered = True
+            if serial:
+                return serial
+        if attempt < attempts - 1:
+            await asyncio.sleep(2)
+    if not answered and last_err is not None:
+        raise last_err
+    return None
+
+
 class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
     """Initial connection setup."""
 
@@ -179,7 +208,7 @@ class UniteConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             serial: Any = None
             try:
-                serial = await client.read_register(R.SERIAL_NUMBER)
+                serial = await _read_serial_with_retry(client)
             except WebastoModbusError:
                 errors["base"] = "cannot_connect"
             except Exception:  # noqa: BLE001 - never let setup hang/crash

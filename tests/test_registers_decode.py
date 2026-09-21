@@ -96,3 +96,25 @@ def test_decode_session_rfid_string():
     # an idle charger reports all zeros -> empty string (the coordinator maps
     # that to None so the sensor reads 'unknown' instead of blank)
     assert R.decode_scalar(R.SESSION_RFID_TAG, [0] * 15) == ""
+
+
+def test_decode_string_tolerant_encoding():
+    """Same firmware family, two spellings: ASCII and UTF-16.
+
+    Placeholders and info strings arrive as plain ASCII; real RFID tags on
+    some firmware arrive NUL-interleaved (UTF-16BE). The decoder detects the
+    spelling per reading, so neither charger needs a setting.
+    """
+    def words_of(raw: bytes) -> list[int]:
+        raw = raw.ljust(30, b"\x00")
+        return [int.from_bytes(raw[i:i + 2], "big") for i in range(0, 30, 2)]
+
+    # ASCII placeholder stays clean (Danny's own charger: #FREECHARGING).
+    assert R.decode_scalar(R.SESSION_RFID_TAG, words_of(b"#FREECHARGING")) == "#FREECHARGING"
+    # UTF-16BE tag: NUL before every character (the forum report).
+    assert R.decode_scalar(R.SESSION_RFID_TAG, words_of("ABC123".encode("utf-16-be"))) == "ABC123"
+    # Info strings are untouched by the change.
+    assert R.decode_scalar(R.FIRMWARE_VERSION, words_of(b"3.187")) == "3.187"
+    assert R.decode_scalar(R.MODEL, words_of(b"EVC04")) == "EVC04"
+    # Garbage that matches neither spelling falls back to the old ASCII read.
+    assert R.decode_scalar(R.SESSION_RFID_TAG, [0x41FF] + [0] * 14) == "A"
