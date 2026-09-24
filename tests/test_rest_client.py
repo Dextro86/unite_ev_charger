@@ -340,6 +340,24 @@ def test_restore_three_phase_falls_back_to_webconfig(monkeypatch):
     assert calls == [0, 1]  # toggle ran on the webconfig client
 
 
+def test_restore_three_phase_server_error_falls_back_to_webconfig(monkeypatch):
+    calls: list[int] = []
+
+    async def fake_php_set(self, value):
+        calls.append(value)
+
+    monkeypatch.setattr(UnitePhpRestClient, "set_current_limiter_phase", fake_php_set)
+    # JSON login works but the config endpoint 500s (twice: write + retry)
+    # -> webconfig
+    session = RestoreSession({443}, config_status=500, webconfig_body=_LOGIN_FORM)
+    route = asyncio.run(
+        async_restore_three_phase(session, "10.0.0.5", "admin", "x", settle_s=0)
+    )
+    assert route == "webconfig"
+    assert calls == [0, 1]  # toggle ran on the webconfig client
+    assert len(session.config_posts) == 2  # one write + one retry, then fallback
+
+
 # --- lockable cable over webconfig -------------------------------------------
 _LOCKABLE_PAGE = (
     '<input type="hidden" name="token" value="abcdef123456">'
@@ -445,3 +463,21 @@ def test_set_lockable_cable_falls_back_to_webconfig(monkeypatch):
     )
     assert route == "webconfig"
     assert calls == [False]
+
+
+def test_set_lockable_cable_server_error_falls_back_to_webconfig(monkeypatch):
+    calls: list[bool] = []
+
+    async def fake_php_set(self, enabled):
+        calls.append(enabled)
+
+    monkeypatch.setattr(UnitePhpRestClient, "set_lockable_cable", fake_php_set)
+    # JSON login works but the config endpoint 500s (twice: write + retry)
+    # -> webconfig
+    session = RestoreSession({443}, config_status=500, webconfig_body=_LOGIN_FORM)
+    route = asyncio.run(
+        async_set_lockable_cable(session, "10.0.0.5", "admin", "x", True)
+    )
+    assert route == "webconfig"
+    assert calls == [True]
+    assert len(session.config_posts) == 2  # one write + one retry, then fallback

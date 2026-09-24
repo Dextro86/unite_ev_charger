@@ -52,6 +52,16 @@ class UniteRestValidationError(UniteRestError):
     payload shape, which varies across firmware."""
 
 
+class UniteRestServerError(UniteRestError):
+    """The charger web server failed the request (HTTP 5xx).
+
+    Seen on firmware whose JSON login works but whose ``configuration-updates``
+    endpoint crashes instead of applying the write. Callers treat this like a
+    missing endpoint: retry once (a 500 can be transient overload), then fall
+    back to the webconfig portal.
+    """
+
+
 # The installation phase-config field, exposed both on the JSON API
 # (installationSettings.currentLimiterPhase) and the webconfig
 # (currentLimiterPhaseSelection). 0 = 1-phase, 1 = 3-phase.
@@ -124,6 +134,10 @@ class UniteJsonRestClient:
                     if resp.status == 422:
                         raise UniteRestValidationError(
                             f"Config write to {path} rejected (HTTP 422)"
+                        )
+                    if resp.status >= 500:
+                        raise UniteRestServerError(
+                            f"Charger web server failed {path} (HTTP {resp.status})"
                         )
                     if resp.status not in (200, 201, 202, 204):
                         raise UniteRestError(f"Unexpected status {resp.status} for {path}")
@@ -370,6 +384,19 @@ async def async_build_rest_client(
     )
 
 
+async def _write_with_server_retry(write, *args) -> None:
+    """Run a JSON config write, retrying a server error once.
+
+    A HTTP 500 can be transient overload, so one immediate retry is cheap.
+    A persistent 500 propagates as UniteRestServerError and the caller falls
+    back to the webconfig portal.
+    """
+    try:
+        await write(*args)
+    except UniteRestServerError:
+        await write(*args)
+
+
 async def async_restart_charger(
     session: aiohttp.ClientSession, host: str, username: str, password: str
 ) -> str:
@@ -428,17 +455,27 @@ async def async_restore_three_phase(
     Auth failures propagate.
     """
     json_endpoint_missing = False
+    json_server_error = False
     for port in JSON_API_PORTS:
         if not await _probe_json_api(session, host, port):
             continue
         client = UniteJsonRestClient(session, host, username, password, port=port)
         try:
-            await client.set_current_limiter_phase(0)
+            await _write_with_server_retry(client.set_current_limiter_phase, 0)
+            await asyncio.sleep(settle_s)
+            await _write_with_server_retry(client.set_current_limiter_phase, 1)
         except UniteRestEndpointMissing:
             json_endpoint_missing = True  # login works but no config endpoint here
             break
-        await asyncio.sleep(settle_s)
-        await client.set_current_limiter_phase(1)
+        except UniteRestServerError as err:
+            json_server_error = True  # endpoint crashes; try webconfig instead
+            _LOGGER.debug(
+                "JSON config write on %s:%s failed (%s), trying webconfig",
+                host,
+                port,
+                err,
+            )
+            break
         _LOGGER.debug("Restored 3-phase config on %s via JSON API on port %s", host, port)
         return f"json:{port}"
 
@@ -450,10 +487,10 @@ async def async_restore_three_phase(
         _LOGGER.debug("Restored 3-phase config on %s via webconfig", host)
         return "webconfig"
 
-    if json_endpoint_missing:
+    if json_endpoint_missing or json_server_error:
         raise UniteRestError(
-            "The JSON API has no configuration endpoint on this firmware and no "
-            "webconfig portal was found to fall back to"
+            "The JSON API has no working configuration endpoint on this firmware "
+            "and no webconfig portal was found to fall back to"
         )
     raise UniteRestError(
         "No reachable web UI found (tried the JSON API on 443/4443 and the HTTP webconfig portal)"
@@ -474,14 +511,24 @@ async def async_set_lockable_cable(
     """
     value = 1 if enabled else 0
     json_endpoint_missing = False
+    json_server_error = False
     for port in JSON_API_PORTS:
         if not await _probe_json_api(session, host, port):
             continue
         client = UniteJsonRestClient(session, host, username, password, port=port)
         try:
-            await client.set_lockable_cable(value)
+            await _write_with_server_retry(client.set_lockable_cable, value)
         except UniteRestEndpointMissing:
             json_endpoint_missing = True  # login works but no config endpoint here
+            break
+        except UniteRestServerError as err:
+            json_server_error = True  # endpoint crashes; try webconfig instead
+            _LOGGER.debug(
+                "JSON config write on %s:%s failed (%s), trying webconfig",
+                host,
+                port,
+                err,
+            )
             break
         _LOGGER.debug(
             "Set lockable cable to %s on %s via JSON API on port %s",
@@ -496,10 +543,10 @@ async def async_set_lockable_cable(
         _LOGGER.debug("Set lockable cable to %s on %s via webconfig", value, host)
         return "webconfig"
 
-    if json_endpoint_missing:
+    if json_endpoint_missing or json_server_error:
         raise UniteRestError(
-            "The JSON API has no configuration endpoint on this firmware and no "
-            "webconfig portal was found to fall back to"
+            "The JSON API has no working configuration endpoint on this firmware "
+            "and no webconfig portal was found to fall back to"
         )
     raise UniteRestError(
         "No reachable web UI found (tried the JSON API on 443/4443 and the HTTP webconfig portal)"
