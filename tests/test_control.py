@@ -11,16 +11,18 @@ LIMITS = C.Limits(min_current=6, max_current=16, cable_max=32)
 
 # --- state inspector + phase mismatch ---------------------------------------
 def test_is_phase_mismatch():
-    # 3-phase actively requested but only L1 drawing -> mismatch
-    assert C.is_phase_mismatch(True, True, 15.0, 0.0, 0.4) is True
+    # 3-phase actively requested but only L1 drawing -> mismatch (threshold 2.0 A)
+    assert C.is_phase_mismatch(True, True, 15.0, 0.0, 0.4, 2.0) is True
     # 3-phase requested and genuinely 3-phase -> no mismatch
-    assert C.is_phase_mismatch(True, True, 15.0, 15.0, 15.0) is False
+    assert C.is_phase_mismatch(True, True, 15.0, 15.0, 15.0, 2.0) is False
     # no 3-phase request (e.g. a 1-phase car) -> never a mismatch, even on L1 only.
     # This is the false positive we fixed: 405 resting at its 3-phase default is
     # not a request.
-    assert C.is_phase_mismatch(True, False, 15.0, 0.0, 0.0) is False
+    assert C.is_phase_mismatch(True, False, 15.0, 0.0, 0.0, 2.0) is False
     # not charging -> never a mismatch
-    assert C.is_phase_mismatch(False, True, 0.0, 0.0, 0.0) is False
+    assert C.is_phase_mismatch(False, True, 0.0, 0.0, 0.0, 2.0) is False
+    # an idle-phase leak below the threshold still counts as single-phase
+    assert C.is_phase_mismatch(True, True, 15.0, 0.27, 0.27, 2.0) is True
 
 
 def _state(**over):

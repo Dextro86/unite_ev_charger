@@ -80,21 +80,39 @@ def test_measured_phase_detection():
     assert ChargeControl._measured_single_phase(_charging_3p()) is False
 
 
-def test_should_start_recovery_gating():
+def test_watcher_recovery_gating():
     ctl, _, _ = _control()
-    assert ctl._should_start_recovery(_charging_1p()) is True
+    ctl._requested_phase = "3"
+    ctl._maybe_start_phase_fix(_charging_1p())     # 1p while 3 wanted -> arms
+    assert ctl._phase_mismatch_since is not None
+    assert ctl.recovery_active is False
 
-    disabled, _, _ = _control(phase_recovery_enabled=False)
-    assert disabled._should_start_recovery(_charging_1p()) is False
+    off, _, _ = _control(phase_recovery_enabled=False)
+    off._requested_phase = "3"
+    off._maybe_start_phase_fix(_charging_1p())
+    assert off._phase_mismatch_since is None       # disabled -> never arms
 
+    already3, _, _ = _control()
+    already3._requested_phase = "3"
+    already3._maybe_start_phase_fix(_charging_3p())
+    assert already3._phase_mismatch_since is None   # no mismatch
+
+    nc, _, _ = _control()
+    nc._requested_phase = "3"
     not_charging = _charging_1p()
     not_charging.charge_point_state_raw = 1
-    assert ctl._should_start_recovery(not_charging) is False
+    nc._maybe_start_phase_fix(not_charging)
+    assert nc._phase_mismatch_since is None
 
-    assert ctl._should_start_recovery(_charging_3p()) is False  # already 3-phase
 
+def test_recovery_latch_blocks_repeat():
+    ctl, _, _ = _control()
+    ctl._requested_phase = "3"
+    ctl._last_wanted_phase = 3       # avoid the re-arm reset
     ctl._recovery_attempted = True
-    assert ctl._should_start_recovery(_charging_1p()) is False  # latched
+    ctl._maybe_start_phase_fix(_charging_1p())
+    assert ctl._phase_mismatch_since is None
+    assert ctl.recovery_active is False
 
 
 def test_disabled_is_pure_passthrough():
@@ -105,21 +123,25 @@ def test_disabled_is_pure_passthrough():
     assert ctl.recovery_active is False
 
 
-def test_phase3_while_charging_1p_starts_recovery():
-    ctl, client, coord = _control(phase_recovery_observe=30, phase_recovery_dwell=30)
+def test_watcher_starts_recovery_after_sustained_mismatch():
+    ctl, client, coord = _control(phase_recovery_observe=0, phase_recovery_dwell=0)
     coord.data = _charging_1p()
 
     async def run():
-        await ctl.async_external_set_phase(3)
-        await asyncio.sleep(0)  # let the observer task run to its first await
-        snapshot = (list(client.writes), ctl.recovery_active, ctl.recovery_status)
-        await ctl.async_shutdown()  # cancel the observing task
-        return snapshot
+        await ctl.async_external_set_phase(3)     # requested_phase="3", writes 405=1
+        await ctl.async_external_set_current(16)  # evcc intent
+        ctl._maybe_start_phase_fix(coord.data)    # arms the mismatch timer
+        armed = ctl._phase_mismatch_since is not None and not ctl.recovery_active
+        ctl._maybe_start_phase_fix(coord.data)    # observe(0) elapsed -> starts
+        await ctl._recovery_task
+        return armed, list(client.writes), ctl.recovery_status
 
-    writes, active, status = asyncio.run(run())
-    assert writes == [("phase_switch", 1)]  # live 405=3 written immediately
-    assert active is True
-    assert status == "observing_3p"
+    armed, writes, status = asyncio.run(run())
+    assert armed is True
+    assert ("phase_switch", 1) in writes         # live 405=3 written on request
+    assert ("set_current_a", 0) in writes        # forced pause
+    assert writes[-1] == ("set_current_a", 16)   # resumed to evcc intent
+    assert status == "complete"
 
 
 def test_buffering_holds_positive_current_but_lets_zero_through():
@@ -138,10 +160,13 @@ def test_buffering_holds_positive_current_but_lets_zero_through():
     assert intent == 0  # intent tracks evcc's latest command
 
 
-def test_latch_resets_on_phase1_request():
+def test_latch_rearms_on_wanted_phase_change():
     ctl, _, _ = _control()
+    ctl._requested_phase = "3"
+    ctl._last_wanted_phase = 3
     ctl._recovery_attempted = True
-    asyncio.run(ctl.async_external_set_phase(1))
+    ctl._requested_phase = "1"                 # target changed -> watcher re-arms
+    ctl._maybe_start_phase_fix(_charging_1p())
     assert ctl._recovery_attempted is False
 
 
@@ -159,15 +184,15 @@ def test_full_recovery_sequence_resumes_evcc_intent():
 
     async def run():
         await ctl.async_external_set_current(16)  # evcc intent = 16 A
-        await ctl.async_external_set_phase(3)     # triggers recovery
-        await ctl._recovery_task                  # run observe(0)+dwell(0) to completion
+        await ctl.async_external_set_phase(3)     # writes live 405=3
+        ctl._start_recovery()                     # watcher starts this after the mismatch
+        await ctl._recovery_task                  # dwell(0) to completion
         return list(client.writes), ctl.recovery_status
 
     writes, status = asyncio.run(run())
     assert ("phase_switch", 1) in writes      # live phase write
     assert ("set_current_a", 0) in writes     # forced pause
     assert writes[-1] == ("set_current_a", 16)  # resumed to evcc's intent, no 2nd 405
-    assert ("phase_switch", 1) == [w for w in writes if w[0] == "phase_switch"][-1]
     assert writes.count(("phase_switch", 1)) == 1  # exactly one 405 write
     assert status == "complete"
 
@@ -240,25 +265,23 @@ def test_on_reconnect_internal_does_not_write_phase():
     assert all(w[0] != "phase_switch" for w in client.writes)
 
 
-def test_internal_1p_to_3p_triggers_recovery():
+def test_internal_watcher_starts_recovery():
     ctl, client, coord = _control(
         control_mode="internal",
         phase_switching=True,
-        phase_recovery_observe=30,
-        phase_recovery_dwell=30,
+        phase_recovery_observe=0,
+        phase_recovery_dwell=0,
     )
     ctl.mode = "manual"
     ctl.phase_preference = "3"
-    data = _charging_1p()
-    coord.data = data
+    coord.data = _charging_1p()
 
     async def run():
-        await ctl._manage_phases(data, 230, 0, False)
-        await asyncio.sleep(0)
-        snapshot = (list(client.writes), ctl.recovery_active)
-        await ctl.async_shutdown()
-        return snapshot
+        ctl._maybe_start_phase_fix(coord.data)  # arm
+        ctl._maybe_start_phase_fix(coord.data)  # fire
+        await ctl._recovery_task
+        return list(client.writes), ctl.recovery_status
 
-    writes, active = asyncio.run(run())
-    assert ("phase_switch", 1) in writes  # live 405=3 first
-    assert active is True                 # recovery started behind it
+    writes, status = asyncio.run(run())
+    assert ("set_current_a", 0) in writes  # forced pause at 0 A
+    assert status == "complete"

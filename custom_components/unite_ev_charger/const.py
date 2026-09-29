@@ -175,14 +175,12 @@ DEFAULT_PHASE_DOWNSHIFT_DWELL_S: Final = 30
 
 # Judge the REAL phase count from measured per-phase current (not register 405,
 # which only says what the charger is set to, not what the car actually draws).
-PHASE_MEASURE_ON_A: Final = 3.0
-PHASE_MEASURE_OFF_A: Final = 2.0
-
-# Per-phase current above which a phase counts as "in use" for the Phases-in-use
-# sensor (and the internal active-phase count). Idle phases can leak a little
-# current (~0.2-0.3 A), so the default sits above that. Configurable.
+# One shared threshold: a phase counts as "in use" above it. Used by the
+# Phases-in-use sensor, the phase-mismatch state, and the recovery/downshift
+# detection, so the GUI reading and the fixes stay consistent. Idle phases can
+# leak a little current (~0.2-0.3 A), so the default sits well above that.
 CONF_PHASE_CURRENT_THRESHOLD: Final = "phase_current_threshold"
-DEFAULT_PHASE_CURRENT_THRESHOLD_A: Final = 0.5
+DEFAULT_PHASE_CURRENT_THRESHOLD_A: Final = 2.0
 
 # --- DLB input health -------------------------------------------------------
 # DLB exists to protect the main fuse, so it must fail closed: a grid-current

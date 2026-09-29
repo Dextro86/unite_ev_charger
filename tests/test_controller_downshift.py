@@ -80,38 +80,40 @@ def _charging_1p(set_current: int = 16) -> WallboxData:
     return d
 
 
-def test_downshift_target_is_1p():
+def test_wanted_phase():
     ext, _, _ = _control()
     ext._requested_phase = "1"
-    assert ext._downshift_target_is_1p() is True
+    assert ext._wanted_phase() == 1
     ext._requested_phase = "3"
-    assert ext._downshift_target_is_1p() is False
+    assert ext._wanted_phase() == 3
+    ext._requested_phase = None
+    assert ext._wanted_phase() is None
 
     intern, _, _ = _control(control_mode="internal", phase_switching=True)
     intern.phase_preference = "1"
-    assert intern._downshift_target_is_1p() is True
+    assert intern._wanted_phase() == 1
     intern.phase_preference = "auto"
-    assert intern._downshift_target_is_1p() is False
+    assert intern._wanted_phase() is None
 
 
 def test_watcher_ignores_transient_and_disabled():
     # Only 1 phase drawn -> not a mismatch, timer stays clear.
     ctl, _, _ = _control()
     ctl._requested_phase = "1"
-    ctl._maybe_start_downshift(_charging_1p())
-    assert ctl._downshift_mismatch_since is None
+    ctl._maybe_start_phase_fix(_charging_1p())
+    assert ctl._phase_mismatch_since is None
     assert ctl.recovery_active is False
 
     # 3-phase drawn but 3-phase wanted -> not a mismatch.
     ctl._requested_phase = "3"
-    ctl._maybe_start_downshift(_charging_3p())
-    assert ctl._downshift_mismatch_since is None
+    ctl._maybe_start_phase_fix(_charging_3p())
+    assert ctl._phase_mismatch_since is None
 
     # Disabled -> never arms.
     off, _, _ = _control(phase_downshift_enabled=False)
     off._requested_phase = "1"
-    off._maybe_start_downshift(_charging_3p())
-    assert off._downshift_mismatch_since is None
+    off._maybe_start_phase_fix(_charging_3p())
+    assert off._phase_mismatch_since is None
 
 
 def test_watcher_needs_two_polls_then_starts():
@@ -122,9 +124,9 @@ def test_watcher_needs_two_polls_then_starts():
         await ctl.async_external_set_phase(1)     # sets requested_phase = "1"
         assert client.writes == [("phase_switch", 0)]  # request itself does not fix
         await ctl.async_external_set_current(16)  # evcc intent
-        ctl._maybe_start_downshift(coord.data)    # arms the mismatch timer
-        armed = ctl._downshift_mismatch_since is not None and not ctl.recovery_active
-        ctl._maybe_start_downshift(coord.data)    # observe(0) elapsed -> starts
+        ctl._maybe_start_phase_fix(coord.data)    # arms the mismatch timer
+        armed = ctl._phase_mismatch_since is not None and not ctl.recovery_active
+        ctl._maybe_start_phase_fix(coord.data)    # observe(0) elapsed -> starts
         await ctl._recovery_task
         return armed, list(client.writes), ctl.recovery_status
 
@@ -183,17 +185,18 @@ def test_hybrid_falls_back_to_webui_when_still_3p():
     assert status == "complete"
 
 
-def test_latch_blocks_repeat_and_resets_on_phase3():
+def test_latch_blocks_and_rearms_on_wanted_change():
     ctl, _, coord = _control()
     coord.data = _charging_3p()
     ctl._requested_phase = "1"
+    ctl._last_wanted_phase = 1        # avoid the re-arm reset
     ctl._downshift_attempted = True
-    ctl._maybe_start_downshift(coord.data)  # latched -> no arming
-    assert ctl._downshift_mismatch_since is None
+    ctl._maybe_start_phase_fix(coord.data)  # latched -> no arming
+    assert ctl._phase_mismatch_since is None
     assert ctl.recovery_active is False
 
-    coord.data = _charging_1p()
-    asyncio.run(ctl.async_external_set_phase(3))  # a 3P request re-arms the fix
+    ctl._requested_phase = "3"              # target change re-arms the fix
+    ctl._maybe_start_phase_fix(_charging_1p())
     assert ctl._downshift_attempted is False
 
 

@@ -341,7 +341,7 @@
           "phase_recovery_dwell": "How long charging pauses so the car restarts on 3 phases. Normally 121 s.",
           "phase_downshift_observe": "How long to watch before concluding the car is stuck on 3 phases. Normally 15 s (0 = act immediately).",
           "phase_downshift_dwell": "How long charging pauses so the car restarts on 1 phase. Normally 30 s.",
-          "phase_current_threshold": "A phase counts as 'in use' above this current. Idle phases can leak ~0.2-0.3 A, so 0.5 A treats that as unused. Normally 0.5 A.",
+          "phase_current_threshold": "A phase counts as 'in use' above this current. Used by the Phases-in-use sensor and the recovery/downshift detection, so they stay consistent. Idle phases can leak ~0.2-0.3 A. Normally 2 A.",
           "phase_restore_delay": "Lets the charger finish the session. Plugging back in within this time cancels the restore. Normally 5 s."
         }
       },

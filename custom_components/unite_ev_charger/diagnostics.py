@@ -66,6 +66,7 @@ async def async_get_config_entry_diagnostics(
         mismatch = ctrl.is_phase_mismatch(
             data.charging, requested_3p,
             data.current_l1_a, data.current_l2_a, data.current_l3_a,
+            data.phase_current_threshold,
         )
         restarting = (
             coordinator.rest_restart_until is not None

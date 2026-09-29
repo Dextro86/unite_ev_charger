@@ -27,7 +27,8 @@ def _phase_mismatch(coordinator: WebastoCoordinator) -> bool:
     controller = coordinator.controller
     requested_3p = controller is not None and controller.requested_phase == PHASE_3P
     return ctrl.is_phase_mismatch(
-        d.charging, requested_3p, d.current_l1_a, d.current_l2_a, d.current_l3_a
+        d.charging, requested_3p, d.current_l1_a, d.current_l2_a, d.current_l3_a,
+        d.phase_current_threshold,
     )
 
 

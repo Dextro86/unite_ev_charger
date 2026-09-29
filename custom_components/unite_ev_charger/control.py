@@ -18,8 +18,6 @@ from .const import (
     MODE_SOLAR,
     GRID_PHASES_3,
     NOMINAL_VOLTAGE,
-    PHASE_MEASURE_OFF_A,
-    PHASE_MEASURE_ON_A,
     PHASE_SWITCH_HYSTERESIS,
     PLAUSIBLE_VOLTAGE_MAX,
     PLAUSIBLE_VOLTAGE_MIN,
@@ -32,17 +30,18 @@ def is_phase_mismatch(
     l1: float,
     l2: float,
     l3: float,
+    threshold: float,
 ) -> bool:
     """True when 3-phase was actively requested but the car draws only 1.
 
     Gated on an explicit 3-phase request, NOT on register 405: 405 rests at its
     3-phase default on a 3-phase install, so a 1-phase car would otherwise look
-    like a permanent mismatch. Only asserted with a confident single-phase
-    reading while charging, so a ramping car does not raise a false alarm.
+    like a permanent mismatch. Uses the shared per-phase current threshold, so it
+    matches the Phases-in-use sensor and the recovery/downshift detection.
     """
     if not charging or not requested_3p:
         return False
-    return l1 >= PHASE_MEASURE_ON_A and l2 < PHASE_MEASURE_OFF_A and l3 < PHASE_MEASURE_OFF_A
+    return l1 > threshold and l2 <= threshold and l3 <= threshold
 
 
 def is_three_phase_install(configured: str | None, reported_404: int | None) -> bool:
