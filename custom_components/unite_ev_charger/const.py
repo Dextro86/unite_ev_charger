@@ -178,6 +178,12 @@ DEFAULT_PHASE_DOWNSHIFT_DWELL_S: Final = 30
 PHASE_MEASURE_ON_A: Final = 3.0
 PHASE_MEASURE_OFF_A: Final = 2.0
 
+# Per-phase current above which a phase counts as "in use" for the Phases-in-use
+# sensor (and the internal active-phase count). Idle phases can leak a little
+# current (~0.2-0.3 A), so the default sits above that. Configurable.
+CONF_PHASE_CURRENT_THRESHOLD: Final = "phase_current_threshold"
+DEFAULT_PHASE_CURRENT_THRESHOLD_A: Final = 0.5
+
 # --- DLB input health -------------------------------------------------------
 # DLB exists to protect the main fuse, so it must fail closed: a grid-current
 # sensor that has not reported for this long is treated as unknown rather than

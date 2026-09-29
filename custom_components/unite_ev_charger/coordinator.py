@@ -22,6 +22,7 @@ from .const import (
     CONF_FAILSAFE_TIMEOUT,
     CONF_GRID_PHASES,
     CONF_HOST,
+    CONF_PHASE_CURRENT_THRESHOLD,
     CONF_PHASE_RESTORE_DELAY,
     CONF_PHASE_RESTORE_ON_UNPLUG,
     CONF_PHASE_SWITCHING,
@@ -31,6 +32,7 @@ from .const import (
     CONF_REST_USERNAME,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
+    DEFAULT_PHASE_CURRENT_THRESHOLD_A,
     DEFAULT_PHASE_RESTORE_DELAY_S,
     DEFAULT_PHASE_RESTORE_ON_UNPLUG,
     DEFAULT_PHASE_SWITCHING,
@@ -141,6 +143,11 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             session = await self.client.read_input_block(R.SESSION_BASE, R.SESSION_COUNT)
             data = parse_telemetry(telemetry)
             apply_session(data, session)
+            data.phase_current_threshold = float(
+                self.entry.options.get(
+                    CONF_PHASE_CURRENT_THRESHOLD, DEFAULT_PHASE_CURRENT_THRESHOLD_A
+                )
+            )
 
             # Single optional reads: best-effort, never drop the connection. A
             # failed probe costs one request, not a reconnect storm; a genuine

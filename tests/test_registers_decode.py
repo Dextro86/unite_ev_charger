@@ -43,6 +43,17 @@ def test_telemetry_decode():
     assert data.meter_energy_kwh == 1234.5
 
 
+def test_phases_in_use_threshold_treats_leak_as_unused():
+    d = WallboxData()
+    d.current_l1_a = 16.0
+    d.current_l2_a = 0.27  # idle-phase leak
+    d.current_l3_a = 0.27
+    assert d.phases_in_use == 1  # default 0.5 A threshold ignores the leak
+
+    d.phase_current_threshold = 0.2  # lower it and the leak counts again
+    assert d.phases_in_use == 3
+
+
 def test_session_decode():
     block = [0] * R.SESSION_COUNT
     base = R.SESSION_BASE

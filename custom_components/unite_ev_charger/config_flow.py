@@ -47,6 +47,7 @@ from .const import (
     CONF_METER_MODEL,
     CONF_MIN_CURRENT,
     CONF_NOMINAL_VOLTAGE,
+    CONF_PHASE_CURRENT_THRESHOLD,
     CONF_PHASE_DOWNSHIFT_DWELL,
     CONF_PHASE_DOWNSHIFT_ENABLED,
     CONF_PHASE_DOWNSHIFT_METHOD,
@@ -77,6 +78,7 @@ from .const import (
     DEFAULT_MODE,
     DEFAULT_PHASE_RESTORE_DELAY_S,
     DEFAULT_PHASE_RESTORE_ON_UNPLUG,
+    DEFAULT_PHASE_CURRENT_THRESHOLD_A,
     DEFAULT_PHASE_DOWNSHIFT_DWELL_S,
     DEFAULT_PHASE_DOWNSHIFT_ENABLED,
     DEFAULT_PHASE_DOWNSHIFT_METHOD,
@@ -606,6 +608,9 @@ class UniteOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_PHASE_DOWNSHIFT_DWELL, default=DEFAULT_PHASE_DOWNSHIFT_DWELL_S
                 ): _num(10, 300, 1, "s"),
+                vol.Required(
+                    CONF_PHASE_CURRENT_THRESHOLD, default=DEFAULT_PHASE_CURRENT_THRESHOLD_A
+                ): _num(0.1, 5, 0.1, "A"),
                 vol.Required(
                     CONF_PHASE_RESTORE_DELAY, default=DEFAULT_PHASE_RESTORE_DELAY_S
                 ): _num(

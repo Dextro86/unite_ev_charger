@@ -330,6 +330,7 @@
           "phase_recovery_dwell": "Pauzeduur 1-fase-hulp",
           "phase_downshift_observe": "Kijktijd vóór 3-fase-hulp",
           "phase_downshift_dwell": "Pauzeduur 3-fase-hulp",
+          "phase_current_threshold": "Stroomdrempel fase 'in gebruik'",
           "phase_restore_delay": "Wachttijd na afkoppelen"
         },
         "data_description": {
@@ -340,6 +341,7 @@
           "phase_recovery_dwell": "Hoe lang het laden pauzeert zodat de auto opnieuw op 3 fasen begint. Normaal 121 s.",
           "phase_downshift_observe": "Hoe lang er gekeken wordt voordat vaststaat dat de auto op 3 fasen hangt. Normaal 15 s (0 = direct ingrijpen).",
           "phase_downshift_dwell": "Hoe lang het laden pauzeert zodat de auto opnieuw op 1 fase begint. Normaal 30 s.",
+          "phase_current_threshold": "Een fase telt als 'in gebruik' boven deze stroom. Inactieve fasen lekken soms ~0,2-0,3 A, dus 0,5 A ziet dat als ongebruikt. Normaal 0,5 A.",
           "phase_restore_delay": "Laat de lader de sessie afronden. Binnen deze tijd weer insteken annuleert het herstel. Normaal 5 s."
         }
       },

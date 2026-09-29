@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import registers as R
+from .const import DEFAULT_PHASE_CURRENT_THRESHOLD_A
 from .registers import ChargePointState
 
 
@@ -49,6 +50,9 @@ class WallboxData:
     # Raw phase-capability register 404 (0 = 1-phase, 1 = 3-phase). Read every
     # cycle, not just at setup: a Unite can report it wrong while still booting.
     phase_capability_raw: int | None = None
+    # Per-phase current (A) above which a phase counts as "in use". Set from the
+    # options each poll; idle phases leak a little, so the default sits above it.
+    phase_current_threshold: float = DEFAULT_PHASE_CURRENT_THRESHOLD_A
 
     # -- derived -----------------------------------------------------------
     @property
@@ -87,7 +91,7 @@ class WallboxData:
 
     @property
     def phases_in_use(self) -> int:
-        return sum(1 for c in (self.current_l1_a, self.current_l2_a, self.current_l3_a) if c > 0.2)
+        return sum(1 for c in (self.current_l1_a, self.current_l2_a, self.current_l3_a) if c > self.phase_current_threshold)
 
 
 def parse_telemetry(block: list[int]) -> WallboxData:
