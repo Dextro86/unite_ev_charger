@@ -16,6 +16,7 @@ from uec.models import WallboxData
 
 # Neutralise the hardcoded settle sleep so the full-sequence test is instant.
 controller_module.PHASE_RECOVERY_SETTLE_S = 0
+controller_module.PHASE_FIX_VERIFY_MIN_S = 0
 
 
 class FakeClient:

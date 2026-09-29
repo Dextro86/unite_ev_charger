@@ -69,6 +69,7 @@ from .const import (
     DEFAULT_PHASE_SWITCH_DWELL_S,
     PHASE_FIX_HYBRID_PAUSE_FIRST,
     PHASE_FIX_HYBRID_WEBUI_FIRST,
+    PHASE_FIX_VERIFY_MIN_S,
     PHASE_FIX_WEBUI,
     DLB_PLAUSIBLE_CURRENT_FLOOR_A,
     DLB_SENSOR_MAX_AGE_S,
@@ -421,7 +422,10 @@ class ChargeControl:
             return
         self._recovery_task = asyncio.create_task(
             self._phase_fix_sequence(
-                3, self.cfg.phase_recovery_method, self.cfg.phase_recovery_dwell
+                3,
+                self.cfg.phase_recovery_method,
+                self.cfg.phase_recovery_dwell,
+                self.cfg.phase_recovery_observe,
             )
         )
 
@@ -430,7 +434,10 @@ class ChargeControl:
             return
         self._recovery_task = asyncio.create_task(
             self._phase_fix_sequence(
-                1, self.cfg.phase_downshift_method, self.cfg.phase_downshift_dwell
+                1,
+                self.cfg.phase_downshift_method,
+                self.cfg.phase_downshift_dwell,
+                self.cfg.phase_downshift_observe,
             )
         )
 
@@ -530,9 +537,14 @@ class ChargeControl:
         _LOGGER.info("phase fix: forcing re-negotiation via the web UI")
         await self.coordinator.async_force_phase_resync()
 
-    async def _still_mismatched(self, wanted: int) -> bool:
-        """True if the car still shows the wrong phase count after a short settle."""
-        await asyncio.sleep(PHASE_RECOVERY_SETTLE_S)
+    async def _still_mismatched(self, wanted: int, settle_s: int) -> bool:
+        """True if the car still shows the wrong phase count after a settle.
+
+        Waits long enough for the first method's re-negotiation to complete, and
+        treats "no current flowing" as not-mismatched (a hold), so the fallback
+        never fires while the car is drawing nothing.
+        """
+        await asyncio.sleep(settle_s)
         await self.coordinator.async_request_refresh()
         data = self.coordinator.data
         if data is None or not data.vehicle_connected or not data.charging:
@@ -542,9 +554,12 @@ class ChargeControl:
             else self._measured_three_phase(data)
         )
 
-    async def _phase_fix_sequence(self, wanted: int, method: str, dwell_s: int) -> None:
+    async def _phase_fix_sequence(
+        self, wanted: int, method: str, dwell_s: int, observe_s: int
+    ) -> None:
         # wanted 3 = recovery (car stuck on 1p); wanted 1 = downshift (stuck on 3p).
         label = "recovery 1->3" if wanted == 3 else "downshift 3->1"
+        verify_s = max(observe_s, PHASE_FIX_VERIFY_MIN_S)
         if wanted == 3:
             self._recovery_attempted = True   # at most one fix per episode
         else:
@@ -558,8 +573,9 @@ class ChargeControl:
                         return
                 else:
                     await self._fix_webui()
-                # After a first step, skip the fallback if the fix already took.
-                if i < len(steps) - 1 and not await self._still_mismatched(wanted):
+                # After a first step, skip the fallback if the fix already took
+                # (give the re-negotiation a fair verify window first).
+                if i < len(steps) - 1 and not await self._still_mismatched(wanted, verify_s):
                     break
             self._set_recovery(RECOVERY_COMPLETE)
             _LOGGER.info("phase %s: fix complete", label)

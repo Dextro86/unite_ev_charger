@@ -161,6 +161,9 @@ DEFAULT_PHASE_RECOVERY_METHOD: Final = PHASE_FIX_PAUSE
 DEFAULT_PHASE_RECOVERY_OBSERVE_S: Final = 60
 DEFAULT_PHASE_RECOVERY_DWELL_S: Final = 121  # > the measured 91 s threshold, with margin
 PHASE_RECOVERY_SETTLE_S: Final = 3  # brief settle before re-energising after the pause
+# Before a hybrid falls back to the other method, wait at least this long so the
+# first method's re-negotiation has a fair chance (a CP re-handshake takes time).
+PHASE_FIX_VERIFY_MIN_S: Final = 30
 
 # --- Optional adaptive 3->1 phase downshift ---------------------------------
 # Mirror of the 1->3 recovery for the opposite direction: some cars also cache
