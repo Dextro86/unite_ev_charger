@@ -40,10 +40,13 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
   and 3-phase (fast). A switch is normally a single register write — the Unite
   runs its own IEC CP interruption (the approach evcc uses).
 - **Help for cars stuck on 1 phase** *(opt-in, off by default)* — some cars
-  cache their 1p/3p choice per session and ignore a live 1→3 upshift. When
-  enabled, the integration observes and, only if the car is still physically
-  single-phase, forces a long charging pause (0 A) so the car re-negotiates,
-  then resumes.
+  cache their 1p/3p choice per session and ignore a live 1→3 upshift. A
+  continuous watcher forces a re-negotiation once the car is still drawing one
+  phase while three are wanted. The method is selectable: a charging pause, a
+  web-UI phase-config toggle, or a hybrid of both (either order).
+- **Help for cars stuck on 3 phases** *(opt-in, off by default)* — the mirror of
+  the above: when 1-phase is wanted but the car keeps drawing all three, the
+  same selectable fix forces it back to one phase.
 - **Restore for Unite bug (stuck on 1 phase)** *(opt-in, off by default)* —
   works around a charger bug where a new session starts on 1 phase even though
   3 phases are configured. After every unplug the charger is briefly set to
@@ -112,8 +115,11 @@ How the charger charges. Most people only need *Who controls charging* and
   it. This also keeps the phase fixes below from running on the wrong
   installation.
 - **Switching between 1 and 3 phases** — only on a three-phase connection.
-- **Help cars stuck on 1 phase** — for cars that don't pick up 3 phases by
-  themselves; briefly interrupts charging, so off by default.
+- **Help cars stuck on 1 phase** + **How to force 3 phases** — for cars that
+  don't pick up 3 phases by themselves; briefly interrupts charging, so off by
+  default. The method selects *how* to force it (pause / web UI / hybrid).
+- **Help cars stuck on 3 phases** + **How to force 1 phase** — the mirror, for
+  cars that keep drawing 3 phases when only 1 is wanted.
 - **Restore for Unite bug (stuck on 1 phase)** — pushes the 3-phase setting to
   the charger again after every unplug. Requires the web UI login and a
   three-phase connection.
@@ -148,10 +154,14 @@ Only change these if you know why. Wrong values can stall charging.
 - **Backup current if contact is lost** — what the charger falls back to after
   silence (normally 6 A; 0 A stops charging entirely).
 - **Waiting time before backup** — how long the silence may last (normally 30 s).
-- **Watching time before 1-phase help** (normally 60 s), **pause length for
-  1-phase help** (normally 121 s) and **waiting time after unplugging**
-  (normally 5 s) — these only apply when their switch on the Charging screen
-  is on.
+- **Watching time before 1-phase help** (normally 60 s) and **pause length for
+  1-phase help** (normally 121 s); **watching time before 3-phase help**
+  (normally 15 s) and **pause length for 3-phase help** (normally 30 s); and
+  **waiting time after unplugging** (normally 5 s) — these only apply when their
+  switch on the Charging screen is on.
+- **Phase 'in use' current threshold** (normally 2 A) — a phase counts as in use
+  above this current. Shared by the Phases-in-use sensor and the recovery /
+  downshift detection, so idle-phase leakage (~0.2–0.3 A) reads as unused.
 
 ### Web UI
 
@@ -177,17 +187,28 @@ stores the timestamp and result of the latest recovery attempt.
 
 A phase change is normally a **single write** to register `405` — the Unite runs
 its own IEC 61851 CP interruption, so no external stop/hold is needed. Whether a
-**live** 1→3 switch takes effect mid-session is **car-dependent**: some cars pick
-up the extra phases immediately, others cache their 1p/3p choice for the whole
-session and **ignore a live upshift** — a plain `405` write (from us *or* evcc)
+**live** switch takes effect mid-session is **car-dependent**: some cars follow
+immediately, others cache their 1p/3p choice for the whole session and **ignore
+a live switch in either direction** — a plain `405` write (from us *or* evcc)
 does not move them.
 
-The **1-phase help** (opt-in) is for those cars: it writes 3-phase, observes
-for a while, and only if the car is still physically single-phase does it
-force a long pause (charge current 0 A for the configured time) so the car
-re-initialises on 3 phases, then resumes. It does **not** write `405` a
-second time — the register is already 3-phase; only the pause matters. Two
-diagnostic sensors show the recovery state and remaining time.
+The **phase help** (opt-in) is for those cars, in **both** directions. A
+continuous watcher runs every poll (also under evcc control): when the car's
+measured phase count disagrees with what is wanted for longer than the observe
+window, it forces a re-negotiation. The fix method is selectable:
+
+- **Pause** — hold the charge current at 0 A for the configured time so the car
+  drops to IEC status B and re-initialises on the wanted phase count. No web UI
+  needed.
+- **Web UI** — toggle the installation phase config over the web UI (the same
+  action as *Restore for Unite bug*), which drops the charge current so the car
+  re-reads the standing `405` request. Needs the Web UI login.
+- **Hybrid (pause first)** / **Hybrid (web UI first)** — try one method, then
+  fall back to the other only if the car has not switched afterwards.
+
+The measured phase count uses the shared *Phase 'in use' current threshold*, so
+it matches the Phases-in-use sensor. Two diagnostic sensors show the fix state
+and remaining time.
 
 Note: register `405` resets to its `404` default on **every** Modbus disconnect,
 so the integration re-asserts the desired phase after each reconnect.
