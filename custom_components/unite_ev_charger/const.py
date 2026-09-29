@@ -144,6 +144,35 @@ DEFAULT_PHASE_RECOVERY_OBSERVE_S: Final = 60
 DEFAULT_PHASE_RECOVERY_DWELL_S: Final = 121  # > the measured 91 s threshold, with margin
 PHASE_RECOVERY_SETTLE_S: Final = 3  # brief settle before re-energising after the pause
 
+# --- Optional adaptive 3->1 phase downshift ---------------------------------
+# Mirror of the 1->3 recovery for the opposite direction: some cars also cache
+# 3-phase per session and ignore a live 3->1 downshift, so a 1-phase request is
+# not honoured (the car keeps drawing all three phases). Same remedy - force a
+# re-negotiation - but the method is selectable because the fastest one is
+# firmware/car dependent:
+#   pause  = hold 0 A briefly so the car re-negotiates on its own (no web UI).
+#   webui  = toggle the installation phase config over the web UI (the same
+#            action as the "restore 3-phase" button), which drops the charge
+#            current and makes the car re-read the standing 405=1-phase request.
+#   hybrid = try the pause first, fall back to the web-UI toggle if the car is
+#            still on three phases afterwards.
+CONF_PHASE_DOWNSHIFT_ENABLED: Final = "phase_downshift_enabled"
+CONF_PHASE_DOWNSHIFT_METHOD: Final = "phase_downshift_method"
+CONF_PHASE_DOWNSHIFT_OBSERVE: Final = "phase_downshift_observe"
+CONF_PHASE_DOWNSHIFT_DWELL: Final = "phase_downshift_dwell"
+DOWNSHIFT_METHOD_PAUSE: Final = "pause"
+DOWNSHIFT_METHOD_WEBUI: Final = "webui"
+DOWNSHIFT_METHOD_HYBRID: Final = "hybrid"
+PHASE_DOWNSHIFT_METHODS: Final = (
+    DOWNSHIFT_METHOD_PAUSE,
+    DOWNSHIFT_METHOD_WEBUI,
+    DOWNSHIFT_METHOD_HYBRID,
+)
+DEFAULT_PHASE_DOWNSHIFT_ENABLED: Final = False
+DEFAULT_PHASE_DOWNSHIFT_METHOD: Final = DOWNSHIFT_METHOD_PAUSE
+DEFAULT_PHASE_DOWNSHIFT_OBSERVE_S: Final = 15
+DEFAULT_PHASE_DOWNSHIFT_DWELL_S: Final = 30
+
 # Judge the REAL phase count from measured per-phase current (not register 405,
 # which only says what the charger is set to, not what the car actually draws).
 PHASE_MEASURE_ON_A: Final = 3.0
@@ -165,6 +194,8 @@ RECOVERY_DWELLING: Final = "dwelling"
 RECOVERY_RESUMING: Final = "resuming"
 RECOVERY_COMPLETE: Final = "complete"
 RECOVERY_ABORTED: Final = "aborted"
+RECOVERY_OBSERVING_1P: Final = "observing_1p"  # downshift: watching for a real drop to 1-phase
+RECOVERY_WEBUI: Final = "webui_toggle"         # downshift: forcing re-negotiation over the web UI
 
 # --- Interpreted charger state (State Inspector) ----------------------------
 # One sensor that interprets what the wallbox is doing, composed from state we

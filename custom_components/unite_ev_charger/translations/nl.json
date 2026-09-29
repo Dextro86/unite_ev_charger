@@ -229,6 +229,8 @@
           "grid_phases": "Netaansluiting lader",
           "phase_switching": "Schakelen tussen 1 en 3 fasen",
           "phase_recovery_enabled": "Auto's helpen die op 1 fase blijven hangen",
+          "phase_downshift_enabled": "Auto's helpen die op 3 fasen blijven hangen",
+          "phase_downshift_method": "Hoe 1 fase afdwingen",
           "phase_restore_on_unplug": "Herstel voor Unite-bug (vast op 1 fase)"
         },
         "data_description": {
@@ -239,6 +241,8 @@
           "grid_phases": "1-fase of 3-fasen, zoals de elektricien hem heeft aangesloten. Bij twijfel: kijk in de web-UI van de lader. Deze instelling voorkomt ook dat de fase-oplossingen hieronder op een verkeerde installatie losgaan.",
           "phase_switching": "Laat de lader schakelen tussen 1 fase (zuinig bij weinig zon) en 3 fasen (snel). Alleen aanzetten bij een 3-fasen-aansluiting.",
           "phase_recovery_enabled": "Sommige auto's pakken 3 fasen na het schakelen niet vanzelf op — dan pauzeert de lader even zodat de auto opnieuw op 3 fasen begint. Onderbreekt het laden kort, daarom staat dit standaard uit.",
+          "phase_downshift_enabled": "Sommige auto's blijven 3 fasen trekken na het schakelen naar 1 fase — dan wordt een her-onderhandeling afgedwongen zodat de auto opnieuw op 1 fase begint. Onderbreekt het laden kort, daarom staat dit standaard uit.",
+          "phase_downshift_method": "Pauze = kort 0 A vasthouden. Web-UI = de fase-config van de lader togglen (vereist de web-UI-login). Hybride = eerst pauzeren, val terug op de web-UI-toggle als het nog 3 fasen is.",
           "phase_restore_on_unplug": "Omzeilt een laderbug waarbij een nieuwe sessie op 1 fase start terwijl er 3 fasen zijn ingesteld. Na elk afkoppelen wordt de lader kort op 1 fase en weer terug op 3 fasen gezet, zodat hij zijn eigen instelling opnieuw toepast. Vereist de web-UI-login en een 3-fasen-aansluiting."
         }
       },
@@ -324,6 +328,8 @@
           "failsafe_timeout": "Wachttijd vóór noodstroom",
           "phase_recovery_observe": "Kijktijd vóór 1-fase-hulp",
           "phase_recovery_dwell": "Pauzeduur 1-fase-hulp",
+          "phase_downshift_observe": "Kijktijd vóór 3-fase-hulp",
+          "phase_downshift_dwell": "Pauzeduur 3-fase-hulp",
           "phase_restore_delay": "Wachttijd na afkoppelen"
         },
         "data_description": {
@@ -332,6 +338,8 @@
           "failsafe_timeout": "Hoe lang de stilte mag duren voordat de noodstroom ingaat. Normaal 30 s.",
           "phase_recovery_observe": "Hoe lang er gekeken wordt voordat vaststaat dat de auto op 1 fase hangt. Normaal 60 s.",
           "phase_recovery_dwell": "Hoe lang het laden pauzeert zodat de auto opnieuw op 3 fasen begint. Normaal 121 s.",
+          "phase_downshift_observe": "Hoe lang er gekeken wordt voordat vaststaat dat de auto op 3 fasen hangt. Normaal 15 s (0 = direct ingrijpen).",
+          "phase_downshift_dwell": "Hoe lang het laden pauzeert zodat de auto opnieuw op 1 fase begint. Normaal 30 s.",
           "phase_restore_delay": "Laat de lader de sessie afronden. Binnen deze tijd weer insteken annuleert het herstel. Normaal 5 s."
         }
       },
@@ -386,6 +394,13 @@
       "options": {
         "1": "1-fase (1P)",
         "3": "3-fase (3P)"
+      }
+    },
+    "phase_downshift_method": {
+      "options": {
+        "pause": "Laden pauzeren (geen web-UI nodig)",
+        "webui": "Web-UI fase-toggle (vereist web-UI-login)",
+        "hybrid": "Hybride (pauze, dan web-UI indien nodig)"
       }
     }
   }

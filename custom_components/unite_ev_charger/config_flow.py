@@ -47,6 +47,10 @@ from .const import (
     CONF_METER_MODEL,
     CONF_MIN_CURRENT,
     CONF_NOMINAL_VOLTAGE,
+    CONF_PHASE_DOWNSHIFT_DWELL,
+    CONF_PHASE_DOWNSHIFT_ENABLED,
+    CONF_PHASE_DOWNSHIFT_METHOD,
+    CONF_PHASE_DOWNSHIFT_OBSERVE,
     CONF_PHASE_RESTORE_DELAY,
     CONF_PHASE_RESTORE_ON_UNPLUG,
     CONF_PHASE_RECOVERY_DWELL,
@@ -73,6 +77,10 @@ from .const import (
     DEFAULT_MODE,
     DEFAULT_PHASE_RESTORE_DELAY_S,
     DEFAULT_PHASE_RESTORE_ON_UNPLUG,
+    DEFAULT_PHASE_DOWNSHIFT_DWELL_S,
+    DEFAULT_PHASE_DOWNSHIFT_ENABLED,
+    DEFAULT_PHASE_DOWNSHIFT_METHOD,
+    DEFAULT_PHASE_DOWNSHIFT_OBSERVE_S,
     DEFAULT_PHASE_RECOVERY_DWELL_S,
     DEFAULT_PHASE_RECOVERY_ENABLED,
     DEFAULT_PHASE_RECOVERY_OBSERVE_S,
@@ -96,6 +104,7 @@ from .const import (
     MIN_PHASE_RESTORE_DELAY_S,
     MIN_POLL_INTERVAL,
     NOMINAL_VOLTAGE,
+    PHASE_DOWNSHIFT_METHODS,
 )
 from .modbus import WebastoModbus, WebastoModbusError
 from .rest_client import UniteRestAuthError, UniteRestError, async_build_rest_client
@@ -144,6 +153,16 @@ def _grid_phases_selector() -> selector.SelectSelector:
         selector.SelectSelectorConfig(
             options=list(GRID_PHASES),
             translation_key="grid_phases",
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _downshift_method_selector() -> selector.SelectSelector:
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=list(PHASE_DOWNSHIFT_METHODS),
+            translation_key="phase_downshift_method",
             mode=selector.SelectSelectorMode.DROPDOWN,
         )
     )
@@ -424,6 +443,12 @@ class UniteOptionsFlow(OptionsFlow):
                     CONF_PHASE_RECOVERY_ENABLED, default=DEFAULT_PHASE_RECOVERY_ENABLED
                 ): bool,
                 vol.Required(
+                    CONF_PHASE_DOWNSHIFT_ENABLED, default=DEFAULT_PHASE_DOWNSHIFT_ENABLED
+                ): bool,
+                vol.Required(
+                    CONF_PHASE_DOWNSHIFT_METHOD, default=DEFAULT_PHASE_DOWNSHIFT_METHOD
+                ): _downshift_method_selector(),
+                vol.Required(
                     CONF_PHASE_RESTORE_ON_UNPLUG, default=DEFAULT_PHASE_RESTORE_ON_UNPLUG
                 ): bool,
             }
@@ -575,6 +600,12 @@ class UniteOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_PHASE_RECOVERY_DWELL, default=DEFAULT_PHASE_RECOVERY_DWELL_S
                 ): _num(60, 300, 1, "s"),
+                vol.Required(
+                    CONF_PHASE_DOWNSHIFT_OBSERVE, default=DEFAULT_PHASE_DOWNSHIFT_OBSERVE_S
+                ): _num(0, 120, 1, "s"),
+                vol.Required(
+                    CONF_PHASE_DOWNSHIFT_DWELL, default=DEFAULT_PHASE_DOWNSHIFT_DWELL_S
+                ): _num(10, 300, 1, "s"),
                 vol.Required(
                     CONF_PHASE_RESTORE_DELAY, default=DEFAULT_PHASE_RESTORE_DELAY_S
                 ): _num(

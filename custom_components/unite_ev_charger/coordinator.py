@@ -289,6 +289,30 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         )
         await self.async_request_refresh()
 
+    async def async_force_phase_resync(self) -> str | None:
+        """Force a charger phase re-negotiation over the web UI (register 404).
+
+        Same action as the "restore 3-phase" button: toggling currentLimiterPhase
+        drops the charge current, so the car re-reads the standing register-405
+        request. Used by the controller's downshift fix when the car ignores a
+        live 3->1 switch. Returns the route used, or None when REST is disabled.
+        """
+        o = self.entry.options
+        if not o.get(CONF_REST_ENABLED, DEFAULT_REST_ENABLED):
+            _LOGGER.warning(
+                "phase downshift: web-UI method needs the REST web UI enabled; skipping"
+            )
+            return None
+        route = await async_restore_three_phase(
+            async_get_clientsession(self.hass),
+            self.entry.data[CONF_HOST],
+            o.get(CONF_REST_USERNAME, DEFAULT_REST_USERNAME),
+            o.get(CONF_REST_PASSWORD, ""),
+        )
+        self.last_auto_phase_restore = datetime.now(timezone.utc)
+        _LOGGER.info("phase downshift: web-UI phase re-sync via %s", route)
+        return route
+
     async def _on_new_connection(self, data: WallboxData) -> None:
         """Run the ownership handshake the wallbox expects on a fresh connection.
 
