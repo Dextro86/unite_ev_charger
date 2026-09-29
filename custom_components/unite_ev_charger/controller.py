@@ -308,12 +308,33 @@ class ChargeControl:
         """Recovery only when it is enabled, not already tried this request, and
         the car is genuinely charging on a single phase."""
         if not self.cfg.phase_recovery_enabled:
+            _LOGGER.debug("phase recovery gate: disabled in options")
             return False
         if self.recovery_active or self._recovery_attempted or data is None:
+            _LOGGER.debug(
+                "phase recovery gate: skipped (active=%s attempted=%s has_data=%s)",
+                self.recovery_active,
+                self._recovery_attempted,
+                data is not None,
+            )
             return False
         if not data.vehicle_connected or not data.charging:
+            _LOGGER.debug(
+                "phase recovery gate: not charging (connected=%s charging=%s)",
+                data.vehicle_connected,
+                data.charging,
+            )
             return False
-        return data.phase_switch_raw == 0 or self._measured_single_phase(data)
+        single = data.phase_switch_raw == 0 or self._measured_single_phase(data)
+        _LOGGER.debug(
+            "phase recovery gate: charging, start=%s (405=%s L1=%.2f L2=%.2f L3=%.2f)",
+            single,
+            data.phase_switch_raw,
+            data.current_l1_a,
+            data.current_l2_a,
+            data.current_l3_a,
+        )
+        return single
 
     def _start_recovery(self) -> None:
         if self.recovery_active:
