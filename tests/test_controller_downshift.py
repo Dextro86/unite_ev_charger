@@ -1,9 +1,9 @@
 """Tests for the optional adaptive 3->1 phase downshift.
 
-Mirror of the 1->3 recovery for the opposite direction: when 1-phase is
-requested but the car keeps drawing all three phases, force a re-negotiation.
-The method is selectable (pause / webui / hybrid). Timers are 0 here so the
-whole sequence runs instantly.
+When 1-phase is requested but the car keeps drawing all three phases, a
+continuous watcher (running every poll, both modes) detects the sustained
+mismatch and forces a re-negotiation via the configured method
+(pause / webui / hybrid). Timers are 0 here so the sequence runs instantly.
 """
 from __future__ import annotations
 
@@ -80,53 +80,120 @@ def _charging_1p(set_current: int = 16) -> WallboxData:
     return d
 
 
-def test_should_start_downshift_gating():
+def test_downshift_target_is_1p():
+    ext, _, _ = _control()
+    ext._requested_phase = "1"
+    assert ext._downshift_target_is_1p() is True
+    ext._requested_phase = "3"
+    assert ext._downshift_target_is_1p() is False
+
+    intern, _, _ = _control(control_mode="internal", phase_switching=True)
+    intern.phase_preference = "1"
+    assert intern._downshift_target_is_1p() is True
+    intern.phase_preference = "auto"
+    assert intern._downshift_target_is_1p() is False
+
+
+def test_watcher_ignores_transient_and_disabled():
+    # Only 1 phase drawn -> not a mismatch, timer stays clear.
     ctl, _, _ = _control()
-    assert ctl._should_start_downshift(_charging_3p()) is True
-
-    disabled, _, _ = _control(phase_downshift_enabled=False)
-    assert disabled._should_start_downshift(_charging_3p()) is False
-
-    not_charging = _charging_3p()
-    not_charging.charge_point_state_raw = 1
-    assert ctl._should_start_downshift(not_charging) is False
-
-    assert ctl._should_start_downshift(_charging_1p()) is False  # already 1-phase
-
-    ctl._downshift_attempted = True
-    assert ctl._should_start_downshift(_charging_3p()) is False  # latched
-
-
-def test_disabled_is_pure_passthrough():
-    ctl, client, coord = _control(phase_downshift_enabled=False)
-    coord.data = _charging_3p()
-    asyncio.run(ctl.async_external_set_phase(1))
-    assert client.writes == [("phase_switch", 0)]
+    ctl._requested_phase = "1"
+    ctl._maybe_start_downshift(_charging_1p())
+    assert ctl._downshift_mismatch_since is None
     assert ctl.recovery_active is False
 
+    # 3-phase drawn but 3-phase wanted -> not a mismatch.
+    ctl._requested_phase = "3"
+    ctl._maybe_start_downshift(_charging_3p())
+    assert ctl._downshift_mismatch_since is None
 
-def test_phase1_while_charging_3p_starts_downshift():
-    ctl, client, coord = _control(phase_downshift_observe=30, phase_downshift_dwell=30)
+    # Disabled -> never arms.
+    off, _, _ = _control(phase_downshift_enabled=False)
+    off._requested_phase = "1"
+    off._maybe_start_downshift(_charging_3p())
+    assert off._downshift_mismatch_since is None
+
+
+def test_watcher_needs_two_polls_then_starts():
+    ctl, client, coord = _control(phase_downshift_method="pause")
     coord.data = _charging_3p()
 
     async def run():
-        await ctl.async_external_set_phase(1)
-        await asyncio.sleep(0)  # let the observer task reach its first await
-        snapshot = (list(client.writes), ctl.recovery_active, ctl.recovery_status)
-        await ctl.async_shutdown()  # cancel the observing task
-        return snapshot
+        await ctl.async_external_set_phase(1)     # sets requested_phase = "1"
+        assert client.writes == [("phase_switch", 0)]  # request itself does not fix
+        await ctl.async_external_set_current(16)  # evcc intent
+        ctl._maybe_start_downshift(coord.data)    # arms the mismatch timer
+        armed = ctl._downshift_mismatch_since is not None and not ctl.recovery_active
+        ctl._maybe_start_downshift(coord.data)    # observe(0) elapsed -> starts
+        await ctl._recovery_task
+        return armed, list(client.writes), ctl.recovery_status
 
-    writes, active, status = asyncio.run(run())
-    assert writes == [("phase_switch", 0)]  # live 405=1 written immediately
-    assert active is True
-    assert status == "observing_1p"
+    armed, writes, status = asyncio.run(run())
+    assert armed is True
+    assert ("set_current_a", 0) in writes        # forced pause
+    assert writes[-1] == ("set_current_a", 16)   # resumed to evcc intent
+    assert status == "complete"
 
 
-def test_latch_resets_on_phase3_request():
+def test_pause_method_no_webui():
+    ctl, client, coord = _control(phase_downshift_method="pause")
+    coord.data = _charging_3p()
+
+    async def run():
+        await ctl.async_external_set_current(16)
+        ctl._start_downshift()
+        await ctl._recovery_task
+        return list(client.writes), coord.resync_calls, ctl.recovery_status
+
+    writes, resyncs, status = asyncio.run(run())
+    assert ("set_current_a", 0) in writes
+    assert writes[-1] == ("set_current_a", 16)
+    assert resyncs == 0
+    assert status == "complete"
+
+
+def test_webui_method_calls_resync_without_pause():
+    ctl, client, coord = _control(phase_downshift_method="webui")
+    coord.data = _charging_3p()
+
+    async def run():
+        ctl._start_downshift()
+        await ctl._recovery_task
+        return list(client.writes), coord.resync_calls, ctl.recovery_status
+
+    writes, resyncs, status = asyncio.run(run())
+    assert ("set_current_a", 0) not in writes  # web UI method does not pause
+    assert resyncs == 1
+    assert status == "complete"
+
+
+def test_hybrid_falls_back_to_webui_when_still_3p():
+    ctl, client, coord = _control(phase_downshift_method="hybrid")
+    coord.data = _charging_3p()  # stays 3-phase after the pause -> escalate
+
+    async def run():
+        await ctl.async_external_set_current(16)
+        ctl._start_downshift()
+        await ctl._recovery_task
+        return list(client.writes), coord.resync_calls, ctl.recovery_status
+
+    writes, resyncs, status = asyncio.run(run())
+    assert ("set_current_a", 0) in writes  # paused first
+    assert resyncs == 1                     # then escalated to the web UI
+    assert status == "complete"
+
+
+def test_latch_blocks_repeat_and_resets_on_phase3():
     ctl, _, coord = _control()
-    coord.data = _charging_1p()
+    coord.data = _charging_3p()
+    ctl._requested_phase = "1"
     ctl._downshift_attempted = True
-    asyncio.run(ctl.async_external_set_phase(3))
+    ctl._maybe_start_downshift(coord.data)  # latched -> no arming
+    assert ctl._downshift_mismatch_since is None
+    assert ctl.recovery_active is False
+
+    coord.data = _charging_1p()
+    asyncio.run(ctl.async_external_set_phase(3))  # a 3P request re-arms the fix
     assert ctl._downshift_attempted is False
 
 
@@ -136,53 +203,3 @@ def test_latch_resets_on_disconnect():
     ctl._was_connected = True
     asyncio.run(ctl.async_apply(WallboxData()))  # not connected -> disconnect edge
     assert ctl._downshift_attempted is False
-
-
-def test_pause_method_resumes_evcc_intent():
-    ctl, client, coord = _control(phase_downshift_method="pause")
-    coord.data = _charging_3p()
-
-    async def run():
-        await ctl.async_external_set_current(16)  # evcc intent = 16 A
-        await ctl.async_external_set_phase(1)     # triggers downshift
-        await ctl._recovery_task                  # observe(0)+dwell(0) to completion
-        return list(client.writes), ctl.recovery_status, coord.resync_calls
-
-    writes, status, resyncs = asyncio.run(run())
-    assert ("phase_switch", 0) in writes         # live phase write
-    assert ("set_current_a", 0) in writes        # forced pause
-    assert writes[-1] == ("set_current_a", 16)   # resumed to evcc's intent
-    assert resyncs == 0                           # pause method never touches the web UI
-    assert status == "complete"
-
-
-def test_webui_method_calls_resync():
-    ctl, client, coord = _control(phase_downshift_method="webui")
-    coord.data = _charging_3p()
-
-    async def run():
-        await ctl.async_external_set_phase(1)
-        await ctl._recovery_task
-        return list(client.writes), coord.resync_calls, ctl.recovery_status
-
-    writes, resyncs, status = asyncio.run(run())
-    assert ("phase_switch", 0) in writes
-    assert ("set_current_a", 0) not in writes  # webui method does not pause
-    assert resyncs == 1
-    assert status == "complete"
-
-
-def test_hybrid_falls_back_to_webui_when_still_3p():
-    ctl, client, coord = _control(phase_downshift_method="hybrid")
-    coord.data = _charging_3p()  # stays 3-phase after the pause -> escalate to web UI
-
-    async def run():
-        await ctl.async_external_set_current(16)
-        await ctl.async_external_set_phase(1)
-        await ctl._recovery_task
-        return list(client.writes), coord.resync_calls, ctl.recovery_status
-
-    writes, resyncs, status = asyncio.run(run())
-    assert ("set_current_a", 0) in writes  # paused first
-    assert resyncs == 1                     # then escalated to the web UI
-    assert status == "complete"

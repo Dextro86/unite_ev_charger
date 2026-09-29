@@ -90,7 +90,6 @@ from .const import (
     RECOVERY_DWELLING,
     RECOVERY_IDLE,
     RECOVERY_OBSERVING,
-    RECOVERY_OBSERVING_1P,
     RECOVERY_RESUMING,
     RECOVERY_WEBUI,
     SOLAR_MIN_CHARGE_DURATION_S,
@@ -220,6 +219,7 @@ class ChargeControl:
         self._recovery_attempted: bool = False   # latch: one escalation per 3P request
         self._buffer_commands: bool = False       # hold evcc's writes during the pause
         self._downshift_attempted: bool = False   # latch: one downshift fix per 1P request
+        self._downshift_mismatch_since: float | None = None  # sustained 3p-while-1p timer
         self._dlb_block_reason: str | None = None
         self._last_recovery_at: datetime | None = None
         self._last_recovery_result: str | None = None
@@ -309,9 +309,8 @@ class ChargeControl:
             self.coordinator.async_update_listeners()
             await self._write_phase(1)
             await self.coordinator.async_request_refresh()
-            # If the car ignores the live 3->1 downshift, force a re-negotiation.
-            if self._should_start_downshift(self.coordinator.data):
-                self._start_downshift()
+            # The downshift fix is driven by the continuous watcher in async_apply,
+            # not here: right after the 405 write the currents are still in flux.
             return
         # phases == 3: live write first, then adaptive recovery if it didn't take.
         self._requested_phase = "3"
@@ -372,37 +371,53 @@ class ChargeControl:
         )
         return single
 
-    def _should_start_downshift(self, data: WallboxData | None) -> bool:
-        """Downshift fix only when enabled, not already tried this request, and
-        the car is genuinely still drawing three phases while 1-phase was asked."""
-        if not self.cfg.phase_downshift_enabled:
-            _LOGGER.debug("phase downshift gate: disabled in options")
-            return False
-        if self.recovery_active or self._downshift_attempted or data is None:
+    def _downshift_target_is_1p(self) -> bool:
+        """Whether 1-phase is currently wanted (evcc request or fixed preference)."""
+        if self.is_external:
+            return self._requested_phase == PHASE_1P
+        return self.cfg.phase_switching and self.phase_preference == PHASE_1P
+
+    def _maybe_start_downshift(self, data: WallboxData) -> None:
+        """Continuous watch: start the fix when the car keeps drawing three
+        phases while 1-phase is wanted, sustained past the observe window.
+
+        Runs every poll in both modes (evcc's control loop is otherwise passive),
+        so it catches the car settling back onto three phases seconds after the
+        switch - which a one-shot check at request time misses.
+        """
+        if (
+            not self.cfg.phase_downshift_enabled
+            or self.recovery_active
+            or self._downshift_attempted
+        ):
+            self._downshift_mismatch_since = None
+            return
+        if (
+            not data.vehicle_connected
+            or not data.charging
+            or not self._downshift_target_is_1p()
+            or not self._measured_three_phase(data)
+        ):
+            self._downshift_mismatch_since = None
+            return
+        now = monotonic()
+        if self._downshift_mismatch_since is None:
+            self._downshift_mismatch_since = now
             _LOGGER.debug(
-                "phase downshift gate: skipped (active=%s attempted=%s has_data=%s)",
-                self.recovery_active,
-                self._downshift_attempted,
-                data is not None,
+                "phase downshift: 3-phase seen while 1-phase wanted "
+                "(L1=%.2f L2=%.2f L3=%.2f); watching",
+                data.current_l1_a,
+                data.current_l2_a,
+                data.current_l3_a,
             )
-            return False
-        if not data.vehicle_connected or not data.charging:
-            _LOGGER.debug(
-                "phase downshift gate: not charging (connected=%s charging=%s)",
-                data.vehicle_connected,
-                data.charging,
-            )
-            return False
-        three = self._measured_three_phase(data)
-        _LOGGER.debug(
-            "phase downshift gate: charging, start=%s (405=%s L1=%.2f L2=%.2f L3=%.2f)",
-            three,
-            data.phase_switch_raw,
-            data.current_l1_a,
-            data.current_l2_a,
-            data.current_l3_a,
+            return
+        if now - self._downshift_mismatch_since < self.cfg.phase_downshift_observe:
+            return
+        _LOGGER.info(
+            "phase downshift: sustained 3-phase while 1-phase wanted; starting fix"
         )
-        return three
+        self._downshift_mismatch_since = None
+        self._start_downshift()
 
     def _start_recovery(self) -> None:
         if self.recovery_active:
@@ -548,29 +563,6 @@ class ChargeControl:
         return None  # confirmed still single-phase -> escalate
 
     # -- optional adaptive 3->1 phase downshift -----------------------------
-    async def _observe_downshift(self, observe_s: int) -> str | None:
-        """Return a terminal status if we should stop, or None to escalate."""
-        deadline = monotonic() + observe_s
-        while True:
-            self._set_recovery(RECOVERY_OBSERVING_1P, int(ceil(deadline - monotonic())))
-            data = self.coordinator.data
-            if data is None or not data.vehicle_connected:
-                return RECOVERY_ABORTED
-            if not data.charging or self._measured_single_phase(data):
-                return RECOVERY_COMPLETE  # dropped to 1p on its own
-            if monotonic() >= deadline:
-                break
-            await asyncio.sleep(2)
-            await self.coordinator.async_request_refresh()
-        data = self.coordinator.data
-        if data is None or not data.vehicle_connected:
-            return RECOVERY_ABORTED
-        if not data.charging or self._measured_single_phase(data):
-            return RECOVERY_COMPLETE
-        if not self._measured_three_phase(data):
-            return RECOVERY_COMPLETE  # ambiguous reading -> don't disrupt
-        return None  # confirmed still three-phase -> escalate
-
     async def _still_three_phase_after(self, settle_s: int) -> bool:
         """True if the car is still measured on three phases after a settle."""
         await asyncio.sleep(settle_s)
@@ -583,7 +575,7 @@ class ChargeControl:
     async def _downshift_pause(self, dwell_s: int) -> bool:
         """Hold 0 A so the car re-negotiates down to 1 phase. False if aborted."""
         self._buffer_commands = True
-        _LOGGER.info("phase downshift: still 3-phase, forcing a %ss pause at 0 A", dwell_s)
+        _LOGGER.info("phase downshift: forcing a %ss pause at 0 A", dwell_s)
         await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
         if not await self._dwell(dwell_s):
             _LOGGER.info("phase downshift: aborted (car disconnected during pause)")
@@ -597,17 +589,10 @@ class ChargeControl:
 
     async def _downshift_sequence(self) -> None:
         method = self.cfg.phase_downshift_method
-        observe_s = self.cfg.phase_downshift_observe
         dwell_s = self.cfg.phase_downshift_dwell
         try:
-            # OBSERVE: 405=0 is already written; watch whether the car drops to
-            # 1p on its own before we disrupt anything.
-            _LOGGER.info("phase downshift: observing up to %ss for real 1-phase", observe_s)
-            terminal = await self._observe_downshift(observe_s)
-            if terminal is not None:
-                self._set_recovery(terminal)
-                return
-
+            # The watcher already confirmed a sustained mismatch, so escalate
+            # straight away via the configured method.
             self._downshift_attempted = True   # at most one fix per 1P request
 
             if method in (DOWNSHIFT_METHOD_PAUSE, DOWNSHIFT_METHOD_HYBRID):
@@ -687,6 +672,11 @@ class ChargeControl:
         # minimum with the Charging switch still off.
         if just_connected:
             await self._reassert_current_on_reconnect()
+
+        # Continuous 3->1 downshift watch (both modes): 1-phase is wanted but the
+        # car keeps drawing three. Runs before the external early-return so evcc
+        # sessions are covered too.
+        self._maybe_start_downshift(data)
 
         # External control (evcc): stay passive. The heartbeat keeps running in
         # the coordinator, so the wallbox does not drop to its failsafe.
@@ -843,12 +833,10 @@ class ChargeControl:
         if desired == 3:
             self._downshift_attempted = False
         # If a live 1->3 during charging does not take (car stuck on one phase),
-        # the opt-in recovery forces a pause so the car re-negotiates.
+        # the opt-in recovery forces a pause so the car re-negotiates. The 3->1
+        # direction is handled by the continuous watcher in async_apply.
         if desired == 3 and current == 1 and self._should_start_recovery(data):
             self._start_recovery()
-        # Mirror for a 3->1 that the car ignores (still drawing three phases).
-        if desired == 1 and current == 3 and self._should_start_downshift(data):
-            self._start_downshift()
 
     async def _write_phase(self, phases: int) -> None:
         value = 1 if phases == 3 else 0

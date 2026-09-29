@@ -194,7 +194,6 @@ RECOVERY_DWELLING: Final = "dwelling"
 RECOVERY_RESUMING: Final = "resuming"
 RECOVERY_COMPLETE: Final = "complete"
 RECOVERY_ABORTED: Final = "aborted"
-RECOVERY_OBSERVING_1P: Final = "observing_1p"  # downshift: watching for a real drop to 1-phase
 RECOVERY_WEBUI: Final = "webui_toggle"         # downshift: forcing re-negotiation over the web UI
 
 # --- Interpreted charger state (State Inspector) ----------------------------
