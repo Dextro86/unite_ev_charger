@@ -169,8 +169,8 @@ def test_webui_method_calls_resync_without_pause():
     assert status == "complete"
 
 
-def test_hybrid_falls_back_to_webui_when_still_3p():
-    ctl, client, coord = _control(phase_downshift_method="hybrid")
+def test_hybrid_pause_first_falls_back_to_webui():
+    ctl, client, coord = _control(phase_downshift_method="hybrid_pause_first")
     coord.data = _charging_3p()  # stays 3-phase after the pause -> escalate
 
     async def run():
@@ -182,6 +182,22 @@ def test_hybrid_falls_back_to_webui_when_still_3p():
     writes, resyncs, status = asyncio.run(run())
     assert ("set_current_a", 0) in writes  # paused first
     assert resyncs == 1                     # then escalated to the web UI
+    assert status == "complete"
+
+
+def test_hybrid_webui_first_falls_back_to_pause():
+    ctl, client, coord = _control(phase_downshift_method="hybrid_webui_first")
+    coord.data = _charging_3p()  # stays 3-phase after the web UI -> escalate to pause
+
+    async def run():
+        await ctl.async_external_set_current(16)
+        ctl._start_downshift()
+        await ctl._recovery_task
+        return list(client.writes), coord.resync_calls, ctl.recovery_status
+
+    writes, resyncs, status = asyncio.run(run())
+    assert resyncs == 1                     # web UI tried first
+    assert ("set_current_a", 0) in writes  # then fell back to the pause
     assert status == "complete"
 
 

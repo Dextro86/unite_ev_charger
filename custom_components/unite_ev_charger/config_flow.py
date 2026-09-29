@@ -56,6 +56,7 @@ from .const import (
     CONF_PHASE_RESTORE_ON_UNPLUG,
     CONF_PHASE_RECOVERY_DWELL,
     CONF_PHASE_RECOVERY_ENABLED,
+    CONF_PHASE_RECOVERY_METHOD,
     CONF_PHASE_RECOVERY_OBSERVE,
     CONF_PHASE_SWITCH_DWELL,
     CONF_PHASE_SWITCHING,
@@ -85,6 +86,7 @@ from .const import (
     DEFAULT_PHASE_DOWNSHIFT_OBSERVE_S,
     DEFAULT_PHASE_RECOVERY_DWELL_S,
     DEFAULT_PHASE_RECOVERY_ENABLED,
+    DEFAULT_PHASE_RECOVERY_METHOD,
     DEFAULT_PHASE_RECOVERY_OBSERVE_S,
     DEFAULT_PHASE_SWITCH_DWELL_S,
     DEFAULT_PHASE_SWITCHING,
@@ -106,7 +108,7 @@ from .const import (
     MIN_PHASE_RESTORE_DELAY_S,
     MIN_POLL_INTERVAL,
     NOMINAL_VOLTAGE,
-    PHASE_DOWNSHIFT_METHODS,
+    PHASE_FIX_METHODS,
 )
 from .modbus import WebastoModbus, WebastoModbusError
 from .rest_client import UniteRestAuthError, UniteRestError, async_build_rest_client
@@ -160,11 +162,11 @@ def _grid_phases_selector() -> selector.SelectSelector:
     )
 
 
-def _downshift_method_selector() -> selector.SelectSelector:
+def _phase_fix_method_selector() -> selector.SelectSelector:
     return selector.SelectSelector(
         selector.SelectSelectorConfig(
-            options=list(PHASE_DOWNSHIFT_METHODS),
-            translation_key="phase_downshift_method",
+            options=list(PHASE_FIX_METHODS),
+            translation_key="phase_fix_method",
             mode=selector.SelectSelectorMode.DROPDOWN,
         )
     )
@@ -445,11 +447,14 @@ class UniteOptionsFlow(OptionsFlow):
                     CONF_PHASE_RECOVERY_ENABLED, default=DEFAULT_PHASE_RECOVERY_ENABLED
                 ): bool,
                 vol.Required(
+                    CONF_PHASE_RECOVERY_METHOD, default=DEFAULT_PHASE_RECOVERY_METHOD
+                ): _phase_fix_method_selector(),
+                vol.Required(
                     CONF_PHASE_DOWNSHIFT_ENABLED, default=DEFAULT_PHASE_DOWNSHIFT_ENABLED
                 ): bool,
                 vol.Required(
                     CONF_PHASE_DOWNSHIFT_METHOD, default=DEFAULT_PHASE_DOWNSHIFT_METHOD
-                ): _downshift_method_selector(),
+                ): _phase_fix_method_selector(),
                 vol.Required(
                     CONF_PHASE_RESTORE_ON_UNPLUG, default=DEFAULT_PHASE_RESTORE_ON_UNPLUG
                 ): bool,

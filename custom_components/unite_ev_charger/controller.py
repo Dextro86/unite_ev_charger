@@ -44,6 +44,7 @@ from .const import (
     CONF_PHASE_DOWNSHIFT_OBSERVE,
     CONF_PHASE_RECOVERY_DWELL,
     CONF_PHASE_RECOVERY_ENABLED,
+    CONF_PHASE_RECOVERY_METHOD,
     CONF_PHASE_RECOVERY_OBSERVE,
     CONF_PHASE_SWITCH_DWELL,
     CONF_PHASE_SWITCHING,
@@ -63,11 +64,12 @@ from .const import (
     DEFAULT_PHASE_DOWNSHIFT_OBSERVE_S,
     DEFAULT_PHASE_RECOVERY_DWELL_S,
     DEFAULT_PHASE_RECOVERY_ENABLED,
+    DEFAULT_PHASE_RECOVERY_METHOD,
     DEFAULT_PHASE_RECOVERY_OBSERVE_S,
     DEFAULT_PHASE_SWITCH_DWELL_S,
-    DOWNSHIFT_METHOD_HYBRID,
-    DOWNSHIFT_METHOD_PAUSE,
-    DOWNSHIFT_METHOD_WEBUI,
+    PHASE_FIX_HYBRID_PAUSE_FIRST,
+    PHASE_FIX_HYBRID_WEBUI_FIRST,
+    PHASE_FIX_WEBUI,
     DLB_PLAUSIBLE_CURRENT_FLOOR_A,
     DLB_SENSOR_MAX_AGE_S,
     DEFAULT_PHASE_PREFERENCE,
@@ -124,6 +126,7 @@ class ControlConfig:
     phase_switching: bool
     phase_switch_dwell: int
     phase_recovery_enabled: bool
+    phase_recovery_method: str
     phase_recovery_observe: int
     phase_recovery_dwell: int
     phase_downshift_enabled: bool
@@ -158,6 +161,9 @@ class ControlConfig:
             phase_switch_dwell=int(o.get(CONF_PHASE_SWITCH_DWELL, DEFAULT_PHASE_SWITCH_DWELL_S)),
             phase_recovery_enabled=bool(
                 o.get(CONF_PHASE_RECOVERY_ENABLED, DEFAULT_PHASE_RECOVERY_ENABLED)
+            ),
+            phase_recovery_method=str(
+                o.get(CONF_PHASE_RECOVERY_METHOD, DEFAULT_PHASE_RECOVERY_METHOD)
             ),
             phase_recovery_observe=int(
                 o.get(CONF_PHASE_RECOVERY_OBSERVE, DEFAULT_PHASE_RECOVERY_OBSERVE_S)
@@ -413,12 +419,20 @@ class ChargeControl:
     def _start_recovery(self) -> None:
         if self.recovery_active:
             return
-        self._recovery_task = asyncio.create_task(self._recovery_sequence())
+        self._recovery_task = asyncio.create_task(
+            self._phase_fix_sequence(
+                3, self.cfg.phase_recovery_method, self.cfg.phase_recovery_dwell
+            )
+        )
 
     def _start_downshift(self) -> None:
         if self.recovery_active:
             return
-        self._recovery_task = asyncio.create_task(self._downshift_sequence())
+        self._recovery_task = asyncio.create_task(
+            self._phase_fix_sequence(
+                1, self.cfg.phase_downshift_method, self.cfg.phase_downshift_dwell
+            )
+        )
 
     def _cancel_recovery(self) -> None:
         if self._recovery_task is not None and not self._recovery_task.done():
@@ -486,59 +500,24 @@ class ChargeControl:
                 pass
         self._recovery_task = None
 
-    async def _recovery_sequence(self) -> None:
-        dwell_s = self.cfg.phase_recovery_dwell
-        try:
-            # The watcher already confirmed a sustained 1-phase mismatch, so
-            # escalate straight to the proven fix: a long pause at 0 A so the car
-            # re-negotiates. No second 405 write - the register is already 3P.
-            self._recovery_attempted = True   # at most one escalation per 3P episode
-            self._buffer_commands = True
-            _LOGGER.info("phase recovery: forcing a %ss pause at 0 A so the car re-negotiates", dwell_s)
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
-            if not await self._dwell(dwell_s):
-                _LOGGER.info("phase recovery: aborted (car disconnected during pause)")
-                self._set_recovery(RECOVERY_ABORTED)
-                return
+    # -- unified phase fix (both 1->3 recovery and 3->1 downshift) -----------
+    @staticmethod
+    def _fix_steps(method: str) -> tuple[str, ...]:
+        if method == PHASE_FIX_WEBUI:
+            return ("webui",)
+        if method == PHASE_FIX_HYBRID_PAUSE_FIRST:
+            return ("pause", "webui")
+        if method == PHASE_FIX_HYBRID_WEBUI_FIRST:
+            return ("webui", "pause")
+        return ("pause",)  # PHASE_FIX_PAUSE
 
-            self._set_recovery(RECOVERY_RESUMING, PHASE_RECOVERY_SETTLE_S)
-            await asyncio.sleep(PHASE_RECOVERY_SETTLE_S)
-            await self._recovery_resume()
-            self._set_recovery(RECOVERY_COMPLETE)
-            _LOGGER.info("phase recovery: complete, charging resumed")
-        except asyncio.CancelledError:
-            self._set_recovery(RECOVERY_ABORTED)
-            raise
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("phase recovery failed: %s", err)
-            self._set_recovery(RECOVERY_ABORTED)
-        finally:
-            if self._recovery_status in (RECOVERY_COMPLETE, RECOVERY_ABORTED):
-                self._last_recovery_at = datetime.now(timezone.utc)
-                self._last_recovery_result = self._recovery_status
-            self._buffer_commands = False
-            self._recovery_remaining_s = 0
-            self.coordinator.async_update_listeners()
-            await self.coordinator.async_request_refresh()
-
-    # -- optional adaptive 3->1 phase downshift -----------------------------
-    async def _still_three_phase_after(self, settle_s: int) -> bool:
-        """True if the car is still measured on three phases after a settle."""
-        await asyncio.sleep(settle_s)
-        await self.coordinator.async_request_refresh()
-        data = self.coordinator.data
-        if data is None or not data.vehicle_connected or not data.charging:
-            return False
-        return self._measured_three_phase(data)
-
-    async def _downshift_pause(self, dwell_s: int) -> bool:
-        """Hold 0 A so the car re-negotiates down to 1 phase. False if aborted."""
+    async def _fix_pause(self, dwell_s: int) -> bool:
+        """Hold 0 A so the car re-negotiates. False if the car unplugged."""
         self._buffer_commands = True
-        _LOGGER.info("phase downshift: forcing a %ss pause at 0 A", dwell_s)
+        _LOGGER.info("phase fix: forcing a %ss pause at 0 A so the car re-negotiates", dwell_s)
         await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
         if not await self._dwell(dwell_s):
-            _LOGGER.info("phase downshift: aborted (car disconnected during pause)")
-            self._set_recovery(RECOVERY_ABORTED)
+            _LOGGER.info("phase fix: aborted (car disconnected during pause)")
             return False
         self._set_recovery(RECOVERY_RESUMING, PHASE_RECOVERY_SETTLE_S)
         await asyncio.sleep(PHASE_RECOVERY_SETTLE_S)
@@ -546,34 +525,49 @@ class ChargeControl:
         self._buffer_commands = False
         return True
 
-    async def _downshift_sequence(self) -> None:
-        method = self.cfg.phase_downshift_method
-        dwell_s = self.cfg.phase_downshift_dwell
+    async def _fix_webui(self) -> None:
+        self._set_recovery(RECOVERY_WEBUI)
+        _LOGGER.info("phase fix: forcing re-negotiation via the web UI")
+        await self.coordinator.async_force_phase_resync()
+
+    async def _still_mismatched(self, wanted: int) -> bool:
+        """True if the car still shows the wrong phase count after a short settle."""
+        await asyncio.sleep(PHASE_RECOVERY_SETTLE_S)
+        await self.coordinator.async_request_refresh()
+        data = self.coordinator.data
+        if data is None or not data.vehicle_connected or not data.charging:
+            return False
+        return (
+            self._measured_single_phase(data) if wanted == 3
+            else self._measured_three_phase(data)
+        )
+
+    async def _phase_fix_sequence(self, wanted: int, method: str, dwell_s: int) -> None:
+        # wanted 3 = recovery (car stuck on 1p); wanted 1 = downshift (stuck on 3p).
+        label = "recovery 1->3" if wanted == 3 else "downshift 3->1"
+        if wanted == 3:
+            self._recovery_attempted = True   # at most one fix per episode
+        else:
+            self._downshift_attempted = True
         try:
-            # The watcher already confirmed a sustained mismatch, so escalate
-            # straight away via the configured method.
-            self._downshift_attempted = True   # at most one fix per 1P request
-
-            if method in (DOWNSHIFT_METHOD_PAUSE, DOWNSHIFT_METHOD_HYBRID):
-                if not await self._downshift_pause(dwell_s):
-                    return
-
-            need_webui = method == DOWNSHIFT_METHOD_WEBUI or (
-                method == DOWNSHIFT_METHOD_HYBRID
-                and await self._still_three_phase_after(PHASE_RECOVERY_SETTLE_S)
-            )
-            if need_webui:
-                self._set_recovery(RECOVERY_WEBUI)
-                _LOGGER.info("phase downshift: forcing re-negotiation via the web UI")
-                await self.coordinator.async_force_phase_resync()
-
+            steps = self._fix_steps(method)
+            for i, step in enumerate(steps):
+                if step == "pause":
+                    if not await self._fix_pause(dwell_s):
+                        self._set_recovery(RECOVERY_ABORTED)
+                        return
+                else:
+                    await self._fix_webui()
+                # After a first step, skip the fallback if the fix already took.
+                if i < len(steps) - 1 and not await self._still_mismatched(wanted):
+                    break
             self._set_recovery(RECOVERY_COMPLETE)
-            _LOGGER.info("phase downshift: complete")
+            _LOGGER.info("phase %s: fix complete", label)
         except asyncio.CancelledError:
             self._set_recovery(RECOVERY_ABORTED)
             raise
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("phase downshift failed: %s", err)
+            _LOGGER.warning("phase %s: fix failed: %s", label, err)
             self._set_recovery(RECOVERY_ABORTED)
         finally:
             if self._recovery_status in (RECOVERY_COMPLETE, RECOVERY_ABORTED):

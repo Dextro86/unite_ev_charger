@@ -127,19 +127,37 @@ PHASE_SWITCH_QUIET_S: Final = 20
 # during charging); the Unite runs its own IEC CP interruption. This mirrors
 # evcc's proven Vestel handling - no stop/hold "recovery" sequence.
 
+# --- Shared phase-fix methods (both 1->3 recovery and 3->1 downshift) --------
+# When a car ignores a live phase switch, force a re-negotiation. The method is
+# selectable because the fastest one is firmware/car dependent:
+#   pause              = hold 0 A briefly so the car re-negotiates (no web UI).
+#   webui              = toggle the installation phase config over the web UI
+#                        (the "restore 3-phase" action), which drops the charge
+#                        current so the car re-reads the standing 405 request.
+#   hybrid_pause_first = pause first, fall back to the web-UI toggle if needed.
+#   hybrid_webui_first = web-UI toggle first, fall back to the pause if needed.
+PHASE_FIX_PAUSE: Final = "pause"
+PHASE_FIX_WEBUI: Final = "webui"
+PHASE_FIX_HYBRID_PAUSE_FIRST: Final = "hybrid_pause_first"
+PHASE_FIX_HYBRID_WEBUI_FIRST: Final = "hybrid_webui_first"
+PHASE_FIX_METHODS: Final = (
+    PHASE_FIX_PAUSE,
+    PHASE_FIX_WEBUI,
+    PHASE_FIX_HYBRID_PAUSE_FIRST,
+    PHASE_FIX_HYBRID_WEBUI_FIRST,
+)
+
 # --- Optional adaptive 1->3 phase recovery ----------------------------------
 # Some cars (verified on real hardware) cache their 1p/3p choice per session and
 # refuse a live 1->3 upshift while charging - neither a plain 405 write nor evcc
-# can force it. The only thing that works is a long charging pause: the car must
-# sit at 0 A / IEC status B long enough (measured: >61 s, 91 s worked) to
-# re-negotiate. Opt-in, off by default, because it deliberately interrupts
-# charging. When on: first try the normal live switch and observe; only if the
-# car is still physically single-phase do we force the pause. We do NOT write
-# 405 again after the pause - the register is already 3P; only the pause matters.
+# can force it. A continuous watcher escalates to the selected fix once the
+# mismatch (3-phase wanted, car still on one) persists past the observe window.
 CONF_PHASE_RECOVERY_ENABLED: Final = "phase_recovery_enabled"
+CONF_PHASE_RECOVERY_METHOD: Final = "phase_recovery_method"
 CONF_PHASE_RECOVERY_OBSERVE: Final = "phase_recovery_observe"
 CONF_PHASE_RECOVERY_DWELL: Final = "phase_recovery_dwell"
 DEFAULT_PHASE_RECOVERY_ENABLED: Final = False
+DEFAULT_PHASE_RECOVERY_METHOD: Final = PHASE_FIX_PAUSE
 DEFAULT_PHASE_RECOVERY_OBSERVE_S: Final = 60
 DEFAULT_PHASE_RECOVERY_DWELL_S: Final = 121  # > the measured 91 s threshold, with margin
 PHASE_RECOVERY_SETTLE_S: Final = 3  # brief settle before re-energising after the pause
@@ -147,29 +165,13 @@ PHASE_RECOVERY_SETTLE_S: Final = 3  # brief settle before re-energising after th
 # --- Optional adaptive 3->1 phase downshift ---------------------------------
 # Mirror of the 1->3 recovery for the opposite direction: some cars also cache
 # 3-phase per session and ignore a live 3->1 downshift, so a 1-phase request is
-# not honoured (the car keeps drawing all three phases). Same remedy - force a
-# re-negotiation - but the method is selectable because the fastest one is
-# firmware/car dependent:
-#   pause  = hold 0 A briefly so the car re-negotiates on its own (no web UI).
-#   webui  = toggle the installation phase config over the web UI (the same
-#            action as the "restore 3-phase" button), which drops the charge
-#            current and makes the car re-read the standing 405=1-phase request.
-#   hybrid = try the pause first, fall back to the web-UI toggle if the car is
-#            still on three phases afterwards.
+# not honoured (the car keeps drawing all three phases). Same selectable methods.
 CONF_PHASE_DOWNSHIFT_ENABLED: Final = "phase_downshift_enabled"
 CONF_PHASE_DOWNSHIFT_METHOD: Final = "phase_downshift_method"
 CONF_PHASE_DOWNSHIFT_OBSERVE: Final = "phase_downshift_observe"
 CONF_PHASE_DOWNSHIFT_DWELL: Final = "phase_downshift_dwell"
-DOWNSHIFT_METHOD_PAUSE: Final = "pause"
-DOWNSHIFT_METHOD_WEBUI: Final = "webui"
-DOWNSHIFT_METHOD_HYBRID: Final = "hybrid"
-PHASE_DOWNSHIFT_METHODS: Final = (
-    DOWNSHIFT_METHOD_PAUSE,
-    DOWNSHIFT_METHOD_WEBUI,
-    DOWNSHIFT_METHOD_HYBRID,
-)
 DEFAULT_PHASE_DOWNSHIFT_ENABLED: Final = False
-DEFAULT_PHASE_DOWNSHIFT_METHOD: Final = DOWNSHIFT_METHOD_PAUSE
+DEFAULT_PHASE_DOWNSHIFT_METHOD: Final = PHASE_FIX_PAUSE
 DEFAULT_PHASE_DOWNSHIFT_OBSERVE_S: Final = 15
 DEFAULT_PHASE_DOWNSHIFT_DWELL_S: Final = 30
 

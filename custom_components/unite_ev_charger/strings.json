@@ -229,6 +229,7 @@
           "grid_phases": "Charger connection",
           "phase_switching": "Switching between 1 and 3 phases",
           "phase_recovery_enabled": "Help cars stuck on 1 phase",
+          "phase_recovery_method": "How to force 3 phases",
           "phase_downshift_enabled": "Help cars stuck on 3 phases",
           "phase_downshift_method": "How to force 1 phase",
           "phase_restore_on_unplug": "Restore for Unite bug (stuck on 1 phase)"
@@ -241,8 +242,9 @@
           "grid_phases": "Single- or three-phase, as your electrician wired it. If unsure, check the charger's web UI. This setting also keeps the phase fixes below from running on the wrong installation.",
           "phase_switching": "Lets the charger switch between 1-phase (efficient with little sun) and 3-phase (fast). Only enable on a three-phase connection.",
           "phase_recovery_enabled": "Some cars don't pick up 3 phases by themselves after switching — then the charger pauses briefly so the car restarts on 3 phases. Interrupts charging briefly, so off by default.",
+          "phase_recovery_method": "How to force the car onto 3 phases. Pause = briefly hold 0 A. Web UI = toggle the charger's phase config (needs the web UI login). Hybrid = try one method first, the other as fallback.",
           "phase_downshift_enabled": "Some cars keep drawing 3 phases after switching to 1 phase — then a re-negotiation is forced so the car restarts on 1 phase. Interrupts charging briefly, so off by default.",
-          "phase_downshift_method": "Pause = briefly hold 0 A. Web UI = toggle the charger's phase config (needs the web UI login). Hybrid = pause first, fall back to the web UI toggle if still on 3 phases.",
+          "phase_downshift_method": "How to force the car onto 1 phase. Pause = briefly hold 0 A. Web UI = toggle the charger's phase config (needs the web UI login). Hybrid = try one method first, the other as fallback.",
           "phase_restore_on_unplug": "Works around a charger bug where a new session starts on 1 phase even though 3 phases are configured. After every unplug the charger is briefly set to 1 phase and back to 3 phases, forcing it to apply its own default. Requires the web UI login and a three-phase connection."
         }
       },
@@ -398,11 +400,12 @@
         "3": "Three-phase (3P)"
       }
     },
-    "phase_downshift_method": {
+    "phase_fix_method": {
       "options": {
         "pause": "Pause charging (no web UI needed)",
         "webui": "Web UI phase toggle (needs web UI login)",
-        "hybrid": "Hybrid (pause, then web UI if needed)"
+        "hybrid_pause_first": "Hybrid: pause first, web UI as fallback",
+        "hybrid_webui_first": "Hybrid: web UI first, pause as fallback"
       }
     }
   }

@@ -31,12 +31,17 @@ class FakeCoordinator:
         self.client = client
         self.device = SimpleNamespace(max_current_a=16, min_current_a=6, phases_supported=3)
         self.data = None
+        self.resync_calls = 0
 
     async def async_request_refresh(self) -> None:
         pass
 
     def async_update_listeners(self) -> None:
         pass
+
+    async def async_force_phase_resync(self) -> str:
+        self.resync_calls += 1
+        return "test"
 
 
 def _control(**overrides):
@@ -194,6 +199,37 @@ def test_full_recovery_sequence_resumes_evcc_intent():
     assert ("set_current_a", 0) in writes     # forced pause
     assert writes[-1] == ("set_current_a", 16)  # resumed to evcc's intent, no 2nd 405
     assert writes.count(("phase_switch", 1)) == 1  # exactly one 405 write
+    assert status == "complete"
+
+
+def test_recovery_webui_method_calls_resync():
+    ctl, client, coord = _control(phase_recovery_method="webui")
+    coord.data = _charging_1p()
+
+    async def run():
+        ctl._start_recovery()
+        await ctl._recovery_task
+        return list(client.writes), coord.resync_calls, ctl.recovery_status
+
+    writes, resyncs, status = asyncio.run(run())
+    assert ("set_current_a", 0) not in writes  # web UI method does not pause
+    assert resyncs == 1
+    assert status == "complete"
+
+
+def test_recovery_hybrid_webui_first_falls_back_to_pause():
+    ctl, client, coord = _control(phase_recovery_method="hybrid_webui_first")
+    coord.data = _charging_1p()  # stays 1-phase after the web UI -> escalate to pause
+
+    async def run():
+        await ctl.async_external_set_current(16)
+        ctl._start_recovery()
+        await ctl._recovery_task
+        return list(client.writes), coord.resync_calls, ctl.recovery_status
+
+    writes, resyncs, status = asyncio.run(run())
+    assert resyncs == 1                     # web UI tried first
+    assert ("set_current_a", 0) in writes  # then fell back to the pause
     assert status == "complete"
 
 
