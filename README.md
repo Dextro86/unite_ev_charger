@@ -204,7 +204,16 @@ window, it forces a re-negotiation. The fix method is selectable:
   action as *Restore for Unite bug*), which drops the charge current so the car
   re-reads the standing `405` request. Needs the Web UI login.
 - **Hybrid (pause first)** / **Hybrid (web UI first)** — try one method, then
-  fall back to the other only if the car has not switched afterwards.
+  fall back to the other only if the car has not switched afterwards. The
+  fallback waits a fair verify window first (at least ~30 s, or the observe
+  window if longer) so the first method's re-negotiation has time to complete,
+  and it never fires while the car is drawing no current.
+
+The watcher only counts the observe window while the car is genuinely charging
+on the wrong phase (current flowing on L1); a drop to no current holds/resets
+the countdown. If your car naturally takes longer than the observe window to
+upshift on its own, raise *Watching time before 3-phase help* on the Advanced
+screen.
 
 The measured phase count uses the shared *Phase 'in use' current threshold*, so
 it matches the Phases-in-use sensor. Two diagnostic sensors show the fix state
