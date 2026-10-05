@@ -11,7 +11,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from . import control as ctrl
-from .const import CONF_HOST, CONF_REST_PASSWORD, CONF_REST_USERNAME, DOMAIN, PHASE_3P
+from .const import (
+    CONF_HOST,
+    CONF_REST_PASSWORD,
+    CONF_REST_USERNAME,
+    DOMAIN,
+    PHASE_3P,
+    integration_version,
+)
 from .coordinator import WebastoCoordinator
 
 # Never leak the wallbox address, serial, or the web-UI credentials in a
@@ -31,12 +38,14 @@ async def async_get_config_entry_diagnostics(
     data = coordinator.data
 
     out: dict[str, Any] = {
+        "version": integration_version(),
         "entry": {
             "data": async_redact_data(dict(entry.data), TO_REDACT),
             "options": async_redact_data(dict(entry.options), TO_REDACT),
         },
         "device": async_redact_data(asdict(coordinator.device), TO_REDACT),
         "modbus_stats": asdict(coordinator.client.stats),
+        "event_log": coordinator.event_log.as_list(),
         "wallbox": asdict(data) if data is not None else None,
         "last_update_success": coordinator.last_update_success,
         "rest": {
@@ -52,6 +61,7 @@ async def async_get_config_entry_diagnostics(
             "manual_current": controller.manual_current,
             "computed_setpoint": controller.computed_setpoint,
             "available_surplus_w": controller.available_surplus_w,
+            "requested_phase": controller.requested_phase,
             "dlb_block_reason": controller._dlb_block_reason,
             "recovery_status": controller.recovery_status,
             "recovery_active": controller.recovery_active,

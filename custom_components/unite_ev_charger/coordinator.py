@@ -43,6 +43,7 @@ from .const import (
 )
 from . import control as ctrl
 from .control import effective_poll_interval
+from .eventlog import EventLog
 from .rest_client import (
     UnitePhpRestClient,
     UniteRestError,
@@ -68,6 +69,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         self.entry = entry
         self.client = client
         self.device = DeviceInfo()
+        self.event_log = EventLog()
         self.controller = None  # wired in once control is built
         self._vehicle_was_connected = False
         self._auto_restore_task: asyncio.Task | None = None
@@ -110,6 +112,10 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             name=DOMAIN,
             update_interval=timedelta(seconds=effective_poll),
         )
+
+    def record_event(self, kind: str, detail: str) -> None:
+        """Append a diagnostics-only event to the in-memory ring buffer."""
+        self.event_log.record(kind, detail)
 
     async def async_read_device_info(self) -> None:
         """Read static identity once. Best effort - missing fields are tolerated."""
@@ -280,8 +286,10 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                 "(will retry at the next unplug): %s",
                 err,
             )
+            self.record_event("phase_restore_failed", str(err))
             return
         self.last_auto_phase_restore = datetime.now(timezone.utc)
+        self.record_event("phase_restore", f"via {route}")
         _LOGGER.info(
             "Vehicle unplugged; re-applied the 3-phase config via %s so the next "
             "session starts clean",
@@ -302,6 +310,9 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         # A new connection may serve new firmware: allow one fresh RFID probe.
         # Strike history survives (it describes the wallbox, not the socket).
         self._rfid_probe.reset_on_reconnect()
+        self.record_event(
+            "reconnect", f"modbus reconnects={self.client.stats.reconnects}"
+        )
         # Capture the pre-integration register values once, before our first
         # write. Stored durably, so a restart never mistakes our own values
         # for the originals.
@@ -416,8 +427,10 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                 "Could not restore charger registers; recover manually: %s",
                 {key: baseline.get(key) for key in failed},
             )
+            self.record_event("baseline_restore_failed", str(failed))
         else:
             _LOGGER.info("Restored charger register baseline on exit")
+            self.record_event("baseline_restore", "ok")
 
     @property
     def device_unique_id(self) -> str:

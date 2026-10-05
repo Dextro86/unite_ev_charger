@@ -47,7 +47,7 @@ class UniteChargingSwitch(UniteEntity, SwitchEntity, RestoreEntity):
         if controller.is_external:
             await controller.async_external_set_enabled(True)
             return
-        controller.charging_enabled = True
+        controller.set_charging_enabled(True)
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
@@ -55,7 +55,7 @@ class UniteChargingSwitch(UniteEntity, SwitchEntity, RestoreEntity):
         if controller.is_external:
             await controller.async_external_set_enabled(False)
             return
-        controller.charging_enabled = False
+        controller.set_charging_enabled(False)
         await self.coordinator.async_request_refresh()
 
     async def async_added_to_hass(self) -> None:

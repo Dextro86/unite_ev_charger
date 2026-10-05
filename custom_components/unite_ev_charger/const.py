@@ -5,9 +5,25 @@ Only connection + safety basics live here for now. Feature-specific config keys
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Final
 
 DOMAIN: Final = "unite_ev_charger"
+
+
+def integration_version() -> str:
+    """Integration version from manifest.json (best effort).
+
+    Diagnostics shows this so a bug report tells us exactly which build it came
+    from. Never raises: a missing/unreadable manifest just yields "unknown".
+    """
+    try:
+        manifest = Path(__file__).resolve().parent / "manifest.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version") or "unknown")
+    except Exception:  # noqa: BLE001 - diagnostics must never fail
+        return "unknown"
 
 # --- Connection -------------------------------------------------------------
 CONF_HOST: Final = "host"

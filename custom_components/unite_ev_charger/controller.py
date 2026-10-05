@@ -87,6 +87,7 @@ from .const import (
 from .inputs import read_current_a, read_power_w
 from .modbus import WebastoModbusError
 from .models import WallboxData
+from .phase import PhaseRecoveryMixin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ class ControlConfig:
         )
 
 
-class ChargeControl:
+class ChargeControl(PhaseRecoveryMixin):
     """Runtime intent + per-cycle control application."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator) -> None:
@@ -189,6 +190,8 @@ class ChargeControl:
         self._recovery_status: str = RECOVERY_IDLE
         self._recovery_remaining_s: int = 0
         self._recovery_attempted: bool = False   # latch: one escalation per 3P request
+        self._downshift_attempted: bool = False  # latch: one escalation per 1P request
+        self._guard_mismatches: int = 0  # trede 1: consecutive wish-vs-405 polls
         self._buffer_commands: bool = False       # hold evcc's writes during the pause
         self._dlb_block_reason: str | None = None
         self._last_recovery_at: datetime | None = None
@@ -198,6 +201,16 @@ class ChargeControl:
         self._requested_phase: str | None = None
         self._current_intent: int | None = None
         self._enabled_intent: bool | None = None
+
+    def _record(self, kind: str, detail: str) -> None:
+        """Append a diagnostics-only event, if the coordinator has a log.
+
+        Tolerates the plain FakeCoordinator used in unit tests (no event log),
+        so recording is always safe and never changes control behaviour.
+        """
+        recorder = getattr(self.coordinator, "record_event", None)
+        if recorder is not None:
+            recorder(kind, detail)
 
     # -- helpers used by entities -------------------------------------------
     @property
@@ -276,59 +289,20 @@ class ChargeControl:
             self._recovery_attempted = False   # a 1P request re-arms recovery
             self._cancel_recovery()
             self.coordinator.async_update_listeners()
-            await self._write_phase(1)
+            await self._write_phase(1, who="evcc")
             await self.coordinator.async_request_refresh()
+            if self._should_start_downshift(self.coordinator.data):
+                self._start_recovery("down")
             return
         # phases == 3: live write first, then adaptive recovery if it didn't take.
         self._requested_phase = "3"
+        self._downshift_attempted = False  # a 3P request re-arms downshift
         self.coordinator.async_update_listeners()
-        await self._write_phase(3)
+        await self._write_phase(3, who="evcc")
         await self.coordinator.async_request_refresh()
         if self._should_start_recovery(self.coordinator.data):
-            self._start_recovery()
+            self._start_recovery("up")
 
-    # -- optional adaptive 1->3 phase recovery ------------------------------
-    @staticmethod
-    def _measured_single_phase(data: WallboxData) -> bool:
-        return (
-            data.current_l1_a >= PHASE_MEASURE_ON_A
-            and data.current_l2_a < PHASE_MEASURE_OFF_A
-            and data.current_l3_a < PHASE_MEASURE_OFF_A
-        )
-
-    @staticmethod
-    def _measured_three_phase(data: WallboxData) -> bool:
-        return (
-            data.current_l1_a >= PHASE_MEASURE_ON_A
-            and data.current_l2_a >= PHASE_MEASURE_ON_A
-            and data.current_l3_a >= PHASE_MEASURE_ON_A
-        )
-
-    def _should_start_recovery(self, data: WallboxData | None) -> bool:
-        """Recovery only when it is enabled, not already tried this request, and
-        the car is genuinely charging on a single phase."""
-        if not self.cfg.phase_recovery_enabled:
-            return False
-        if self.recovery_active or self._recovery_attempted or data is None:
-            return False
-        if not data.vehicle_connected or not data.charging:
-            return False
-        return data.phase_switch_raw == 0 or self._measured_single_phase(data)
-
-    def _start_recovery(self) -> None:
-        if self.recovery_active:
-            return
-        self._recovery_task = asyncio.create_task(self._recovery_sequence())
-
-    def _cancel_recovery(self) -> None:
-        if self._recovery_task is not None and not self._recovery_task.done():
-            self._recovery_task.cancel()
-        self._buffer_commands = False
-
-    def _set_recovery(self, status: str, remaining_s: int = 0) -> None:
-        self._recovery_status = status
-        self._recovery_remaining_s = max(0, remaining_s)
-        self.coordinator.async_update_listeners()
 
     async def async_on_reconnect(self, phase_raw: int | None) -> None:
         """Re-assert charging current AND phase after a fresh Modbus connection.
@@ -358,15 +332,24 @@ class ChargeControl:
             # Internal: the cached last-setpoint is now stale; force the control
             # loop to re-write the freshly computed setpoint this cycle.
             self._last_setpoint = None
+            # "Off" must land on the wire immediately, not one cycle later: at a
+            # new session the wallbox has just applied its own hardware minimum,
+            # so with charging switched off write 0 A now (the loop then confirms
+            # the same value this same cycle).
+            if not self.charging_enabled:
+                await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
 
-    async def _reassert_phase_on_reconnect(self, phase_raw: int | None) -> None:
+    async def _reassert_phase_on_reconnect(
+        self, phase_raw: int | None, *, context: str = "reconnect"
+    ) -> None:
         """Restore the desired phase: the wallbox reset register 405 to its 404
         default on the disconnect (per spec).
 
         Internal mode's control loop re-evaluates the phase this same cycle, so
         only the external (evcc) path needs an explicit re-assert - and only when
         the reset default actually differs from evcc's request, to avoid a
-        needless CP interruption.
+        needless CP interruption. ``context`` only selects the event kind recorded
+        on an actual write ("reconnect" vs "session").
         """
         if not self.is_external or self._requested_phase not in (PHASE_1P, PHASE_3P):
             return
@@ -374,6 +357,42 @@ class ChargeControl:
         if phase_raw == desired_raw:
             return  # reset default already matches -> no write, no CP blip
         await self.coordinator.client.write_register(R.PHASE_SWITCH, desired_raw)
+        if context == "session":
+            self._record(
+                "phase_reassert_session",
+                f"requested={self._requested_phase}P measured={phase_raw} "
+                f"written={desired_raw}",
+            )
+        else:
+            self._record("405_write", f"reconnect reassert reg={desired_raw}")
+
+    async def _guard_phase_setting(self, data: WallboxData) -> None:
+        """Trede 1: keep register 405 converged with evcc's wish, mid-session.
+
+        Only ever rewrites evcc's own wish (never invents one), only after 3
+        consecutive polls of disagreement (ramping never trips it), and never
+        while a recovery owns the charger. Worst case of a wrong call is one
+        redundant identical write.
+        """
+        if self.recovery_active:
+            self._guard_mismatches = 0
+            return
+        wish = self._requested_phase
+        if wish not in (PHASE_1P, PHASE_3P):
+            self._guard_mismatches = 0
+            return
+        if not data.vehicle_connected:
+            self._guard_mismatches = 0
+            return
+        desired_raw = 1 if wish == PHASE_3P else 0
+        if data.phase_switch_raw is None or data.phase_switch_raw == desired_raw:
+            self._guard_mismatches = 0
+            return
+        self._guard_mismatches += 1
+        if self._guard_mismatches < 3:
+            return
+        self._guard_mismatches = 0
+        await self._write_phase(3 if wish == PHASE_3P else 1, who="guard")
 
     async def async_shutdown(self) -> None:
         """Cancel any running recovery so unload/reload leaves nothing behind."""
@@ -386,101 +405,6 @@ class ChargeControl:
                 pass
         self._recovery_task = None
 
-    async def _recovery_sequence(self) -> None:
-        observe_s = self.cfg.phase_recovery_observe
-        dwell_s = self.cfg.phase_recovery_dwell
-        try:
-            # OBSERVE: 405=3 is already written; watch whether the car goes 3p
-            # on its own (cooperative cars / plug-in) before we disrupt anything.
-            _LOGGER.info("phase recovery: observing up to %ss for real 3-phase", observe_s)
-            terminal = await self._observe_phase(observe_s)
-            if terminal is not None:
-                self._set_recovery(terminal)
-                return
-
-            # ESCALATE: the proven fix - a long pause so the car re-negotiates.
-            self._recovery_attempted = True   # at most one escalation per 3P request
-            self._buffer_commands = True
-            _LOGGER.info("phase recovery: still 1-phase, forcing a %ss pause at 0 A", dwell_s)
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
-            if not await self._dwell(dwell_s):
-                _LOGGER.info("phase recovery: aborted (car disconnected during pause)")
-                self._set_recovery(RECOVERY_ABORTED)
-                return
-
-            # No second 405 write: the register is already 3P. Only the pause
-            # matters - the car re-reads the phase on its fresh handshake.
-            self._set_recovery(RECOVERY_RESUMING, PHASE_RECOVERY_SETTLE_S)
-            await asyncio.sleep(PHASE_RECOVERY_SETTLE_S)
-            await self._recovery_resume()
-            self._set_recovery(RECOVERY_COMPLETE)
-            _LOGGER.info("phase recovery: complete, charging resumed")
-        except asyncio.CancelledError:
-            self._set_recovery(RECOVERY_ABORTED)
-            raise
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("phase recovery failed: %s", err)
-            self._set_recovery(RECOVERY_ABORTED)
-        finally:
-            if self._recovery_status in (RECOVERY_COMPLETE, RECOVERY_ABORTED):
-                self._last_recovery_at = datetime.now(timezone.utc)
-                self._last_recovery_result = self._recovery_status
-            self._buffer_commands = False
-            self._recovery_remaining_s = 0
-            self.coordinator.async_update_listeners()
-            await self.coordinator.async_request_refresh()
-
-    async def _observe_phase(self, observe_s: int) -> str | None:
-        """Return a terminal status if we should stop, or None to escalate."""
-        deadline = monotonic() + observe_s
-        while True:
-            self._set_recovery(RECOVERY_OBSERVING, int(ceil(deadline - monotonic())))
-            data = self.coordinator.data
-            if data is None or not data.vehicle_connected:
-                return RECOVERY_ABORTED
-            if not data.charging or self._measured_three_phase(data):
-                return RECOVERY_COMPLETE  # went 3p on its own
-            if monotonic() >= deadline:
-                break
-            await asyncio.sleep(2)
-            await self.coordinator.async_request_refresh()
-        data = self.coordinator.data
-        if data is None or not data.vehicle_connected:
-            return RECOVERY_ABORTED
-        if not data.charging or self._measured_three_phase(data):
-            return RECOVERY_COMPLETE
-        if not self._measured_single_phase(data):
-            return RECOVERY_COMPLETE  # ambiguous reading -> don't disrupt
-        return None  # confirmed still single-phase -> escalate
-
-    async def _dwell(self, dwell_s: int) -> bool:
-        """Hold 0 A for the dwell. Return False if the car unplugs meanwhile."""
-        deadline = monotonic() + dwell_s
-        while monotonic() < deadline:
-            self._set_recovery(RECOVERY_DWELLING, int(ceil(deadline - monotonic())))
-            await asyncio.sleep(1)
-            data = self.coordinator.data
-            if data is not None and not data.vehicle_connected:
-                return False
-        return True
-
-    async def _recovery_resume(self) -> None:
-        if self.is_external:
-            # Last intent wins. A stop/disable during the pause is respected.
-            if self._enabled_intent is False:
-                value = 0
-            elif self._current_intent is not None:
-                value = self._current_intent
-            else:
-                value = self._ext_resume_current
-            value = max(0, min(ABS_MAX_CURRENT_A, int(value)))
-            if value > 0:
-                self._ext_resume_current = value
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, value)
-        else:
-            # Internal: let the control loop write the freshly computed setpoint
-            # for the new (3-phase) config on the next cycle.
-            self._last_setpoint = None
 
     # -- the per-cycle entry point ------------------------------------------
     async def async_apply(self, data: WallboxData) -> None:
@@ -491,6 +415,8 @@ class ChargeControl:
         # A fresh session re-arms recovery (both modes).
         if just_disconnected:
             self._recovery_attempted = False
+            self._downshift_attempted = False
+            self._guard_mismatches = 0
         # Plugging in starts a new session and the wallbox sets its own charge
         # current for it (its hardware minimum). Our cached "last written"
         # setpoint is therefore stale: without this, a target that happens to be
@@ -499,10 +425,22 @@ class ChargeControl:
         # minimum with the Charging switch still off.
         if just_connected:
             await self._reassert_current_on_reconnect()
+            # External (evcc) only: re-assert the requested phase if the freshly
+            # read 405 drifted from evcc's request. Internal mode re-evaluates the
+            # phase later this same cycle, so it is left untouched.
+            if (
+                self.is_external
+                and not self.recovery_active
+                and data.phase_switch_raw is not None
+            ):
+                await self._reassert_phase_on_reconnect(
+                    data.phase_switch_raw, context="session"
+                )
 
         # External control (evcc): stay passive. The heartbeat keeps running in
         # the coordinator, so the wallbox does not drop to its failsafe.
         if self.is_external:
+            await self._guard_phase_setting(data)
             return
         # A recovery owns the charger while it runs; keep the control loop out.
         if self.recovery_active:
@@ -654,12 +592,18 @@ class ChargeControl:
         # If a live 1->3 during charging does not take (car stuck on one phase),
         # the opt-in recovery forces a pause so the car re-negotiates.
         if desired == 3 and current == 1 and self._should_start_recovery(data):
-            self._start_recovery()
+            self._start_recovery("up")
+        # Mirror for 3->1: a car stuck on three phases gets the same pause.
+        if desired == 1 and current == 3 and self._should_start_downshift(data):
+            self._start_recovery("down")
+        if desired == 3:
+            self._downshift_attempted = False  # a new 3P cycle re-arms downshift
 
-    async def _write_phase(self, phases: int) -> None:
+    async def _write_phase(self, phases: int, *, who: str = "controller") -> None:
         value = 1 if phases == 3 else 0
         try:
             await self.coordinator.client.write_register(R.PHASE_SWITCH, value)
+            self._record("405_write", f"{who} {phases}P (reg={value})")
             _LOGGER.info("Switched charging to %s phase(s)", phases)
         except WebastoModbusError as err:
             _LOGGER.warning("Failed to switch to %s phase(s): %s", phases, err)
@@ -771,6 +715,19 @@ class ChargeControl:
         cycle rewrites it instead of assuming the charger still has our value.
         """
         self._last_setpoint = None
+
+    def set_charging_enabled(self, enabled: bool) -> None:
+        """Apply the internal charging switch.
+
+        Turning ON only records the intent; the control loop applies the target
+        on the next cycle as before. Turning OFF also forgets the last written
+        setpoint, so the loop's 0 A is written for real instead of being skipped
+        as an "already applied" silent repetition - an explicit off must land on
+        the wire, never be optimised away.
+        """
+        self.charging_enabled = enabled
+        if not enabled:
+            self.invalidate_setpoint_cache()
 
     async def _write_setpoint(self, setpoint: int) -> None:
         # Quiet period right after a phase switch: leave the current setpoint
