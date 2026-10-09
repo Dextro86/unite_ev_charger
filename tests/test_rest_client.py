@@ -18,6 +18,7 @@ from uec.rest_client import (
     UniteRestError,
     _LOCKABLE_FIELD,
     async_build_rest_client,
+    async_read_config_fields,
     async_restart_charger,
     async_restore_three_phase,
     async_set_lockable_cable,
@@ -481,3 +482,75 @@ def test_set_lockable_cable_server_error_falls_back_to_webconfig(monkeypatch):
     assert route == "webconfig"
     assert calls == [True]
     assert len(session.config_posts) == 2  # one write + one retry, then fallback
+
+
+# --- setup field inventory (route intelligence) ------------------------------
+class FieldsSession:
+    """Login ok, then a fixed configuration-fields list."""
+
+    def __init__(self, fields):
+        self.fields = fields
+
+    def post(self, url, **kwargs):
+        return FakeResp(201, {"access_token": "tok"})
+
+    def get(self, url, **kwargs):
+        return FakeResp(200, self.fields)
+
+
+def test_read_config_fields_collects_keys():
+    session = FieldsSession([{"fieldKey": "a.b"}, {"fieldKey": "c.d"}, {"nope": 1}])
+    assert asyncio.run(
+        async_read_config_fields(session, "10.0.0.5", "admin", "x")
+    ) == {"a.b", "c.d"}
+
+
+def test_read_config_fields_none_when_unreachable():
+    # post/get return refused-connection context managers.
+    class RefusedSession:
+        def post(self, url, **kwargs):
+            return _RaisingCtx()
+
+        def get(self, url, **kwargs):
+            return _RaisingCtx()
+
+    assert asyncio.run(
+        async_read_config_fields(RefusedSession(), "10.0.0.5", "admin", "x")
+    ) is None
+
+
+def test_known_fields_missing_key_skips_json(monkeypatch):
+    calls: list[int] = []
+
+    async def fake_php_set(self, value):
+        calls.append(value)
+
+    monkeypatch.setattr(UnitePhpRestClient, "set_current_limiter_phase", fake_php_set)
+    # Inventory without our key: straight to webconfig, zero JSON posts.
+    session = RestoreSession({443}, config_status=500, webconfig_body=_LOGIN_FORM)
+    route = asyncio.run(
+        async_restore_three_phase(
+            session, "10.0.0.5", "admin", "x", settle_s=0, known_fields=set()
+        )
+    )
+    assert route == "webconfig"
+    assert calls == [0, 1]
+    assert session.config_posts == []
+
+
+def test_known_fields_none_keeps_old_fallback(monkeypatch):
+    calls: list[int] = []
+
+    async def fake_php_set(self, value):
+        calls.append(value)
+
+    monkeypatch.setattr(UnitePhpRestClient, "set_current_limiter_phase", fake_php_set)
+    # Unknown inventory: legacy try-JSON-then-webconfig on a 500 firmware.
+    session = RestoreSession({443}, config_status=500, webconfig_body=_LOGIN_FORM)
+    route = asyncio.run(
+        async_restore_three_phase(
+            session, "10.0.0.5", "admin", "x", settle_s=0, known_fields=None
+        )
+    )
+    assert route == "webconfig"
+    assert len(session.config_posts) == 2

@@ -31,12 +31,20 @@ class FakeCoordinator:
         self.client = client
         self.device = SimpleNamespace(max_current_a=16, min_current_a=6, phases_supported=3)
         self.data = None
+        self.fix_notes = 0
+        self.fix_resets = 0
 
     async def async_request_refresh(self) -> None:
         pass
 
     def async_update_listeners(self) -> None:
         pass
+
+    def note_fix_escalated(self) -> None:
+        self.fix_notes += 1
+
+    def reset_fix_failures(self) -> None:
+        self.fix_resets += 1
 
 
 def _control(**overrides):
@@ -153,3 +161,40 @@ def test_guardian_runs_mid_session_via_apply() -> None:
         return client.writes
 
     assert ("phase_switch", 0) in asyncio.run(run())
+
+
+
+
+# --- repairs: escalation contract (controller -> coordinator) ----------------
+def test_escalation_notes_coordinator_each_time():
+    async def main():
+        ctl, _, coord = _control()
+        coord.data = _charging_3p()
+        await ctl.async_external_set_current(16)
+        await ctl.async_external_set_phase(1)
+        await ctl._recovery_task
+        await ctl.async_shutdown()
+        await ctl.async_external_set_phase(3)  # re-arms downshift
+        await ctl.async_external_set_phase(1)
+        await ctl._recovery_task
+        await ctl.async_shutdown()
+        return coord.fix_notes
+
+    assert asyncio.run(main()) == 2
+
+
+def test_disconnect_resets_repair_counter():
+    async def main():
+        ctl, _, coord = _control()
+        coord.data = _charging_3p()
+        await ctl.async_external_set_current(16)
+        await ctl.async_external_set_phase(1)
+        await ctl._recovery_task
+        await ctl.async_shutdown()
+        ctl._was_connected = True  # simulate an ongoing session
+        idle = _charging_3p()
+        idle.cable_state_raw = 0  # unplugged
+        await ctl.async_apply(idle)
+        return coord.fix_resets
+
+    assert asyncio.run(main()) == 1

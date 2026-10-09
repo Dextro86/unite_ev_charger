@@ -16,6 +16,7 @@ from .const import (
     CONF_REST_PASSWORD,
     CONF_REST_USERNAME,
     DOMAIN,
+    PHASE_1P,
     PHASE_3P,
     integration_version,
 )
@@ -73,10 +74,11 @@ async def async_get_config_entry_diagnostics(
     # Interpreted state (the State Inspector), so a bug report reads on its own.
     if data is not None:
         requested_3p = controller is not None and controller.requested_phase == PHASE_3P
-        mismatch = ctrl.is_phase_mismatch(
-            data.charging, requested_3p,
+        requested_1p = controller is not None and controller.requested_phase == PHASE_1P
+        mismatch = ctrl.mismatch_direction(
+            data.charging, requested_3p, requested_1p,
             data.current_l1_a, data.current_l2_a, data.current_l3_a,
-        )
+        ) is not None
         restarting = (
             coordinator.rest_restart_until is not None
             and monotonic() < coordinator.rest_restart_until

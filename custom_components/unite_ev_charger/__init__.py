@@ -51,6 +51,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Inventory the JSON config fields once (best effort): known keys let
+    # config writes skip a doomed JSON attempt and go straight to webconfig.
+    try:
+        await coordinator.async_read_config_fields_once()
+    except Exception:  # noqa: BLE001 - luxury measurement, never fails setup
+        pass
     # Read the lockable-cable installation setting once in the background; the
     # switch stays unavailable until it is known (or when no web UI login set).
     hass.async_create_task(coordinator.async_refresh_lockable_cable())

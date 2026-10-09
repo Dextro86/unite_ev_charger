@@ -45,6 +45,60 @@ def is_phase_mismatch(
     return l1 >= PHASE_MEASURE_ON_A and l2 < PHASE_MEASURE_OFF_A and l3 < PHASE_MEASURE_OFF_A
 
 
+def is_phase_mismatch_down(
+    charging: bool,
+    requested_1p: bool,
+    l1: float,
+    l2: float,
+    l3: float,
+) -> bool:
+    """True when 1-phase was actively requested but the car still draws all 3.
+
+    Mirror of is_phase_mismatch. Inherently safe against 1-phase cars: a car
+    that cannot draw 3 phases can never trip this gate. Only asserted with a
+    confident three-phase reading while charging.
+    """
+    if not charging or not requested_1p:
+        return False
+    return (
+        l1 >= PHASE_MEASURE_ON_A
+        and l2 >= PHASE_MEASURE_ON_A
+        and l3 >= PHASE_MEASURE_ON_A
+    )
+
+
+def mismatch_direction(
+    charging: bool,
+    requested_3p: bool,
+    requested_1p: bool,
+    l1: float,
+    l2: float,
+    l3: float,
+) -> str | None:
+    """"up" (stuck on 1), "down" (stuck on 3) or None when converged."""
+    if is_phase_mismatch(charging, requested_3p, l1, l2, l3):
+        return "up"
+    if is_phase_mismatch_down(charging, requested_1p, l1, l2, l3):
+        return "down"
+    return None
+
+
+def phase_word_from_raw(raw: int | None) -> str | None:
+    """Map a 404/405 register code to the enum state (words via translations)."""
+    if raw is None:
+        return None
+    return "1_phase" if raw == 0 else "3_phases"
+
+
+def phase_word_from_wish(wish: str | None) -> str | None:
+    """Map a "1"/"3" phase wish to the enum state (words via translations)."""
+    if wish == "1":
+        return "1_phase"
+    if wish == "3":
+        return "3_phases"
+    return None
+
+
 def is_three_phase_install(configured: str | None, reported_404: int | None) -> bool:
     """Whether the wallbox is wired for 3 phases.
 

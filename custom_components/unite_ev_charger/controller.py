@@ -191,6 +191,7 @@ class ChargeControl(PhaseRecoveryMixin):
         self._recovery_remaining_s: int = 0
         self._recovery_attempted: bool = False   # latch: one escalation per 3P request
         self._downshift_attempted: bool = False  # latch: one escalation per 1P request
+        self._recovery_direction: str | None = None  # "up"/"down" of last attempt
         self._guard_mismatches: int = 0  # trede 1: consecutive wish-vs-405 polls
         self._buffer_commands: bool = False       # hold evcc's writes during the pause
         self._dlb_block_reason: str | None = None
@@ -224,6 +225,11 @@ class ChargeControl(PhaseRecoveryMixin):
     @property
     def recovery_status(self) -> str:
         return self._recovery_status
+
+    @property
+    def recovery_direction(self) -> str | None:
+        """"up" (1->3), "down" (3->1) or None when no attempt ran yet."""
+        return self._recovery_direction
 
     @property
     def recovery_remaining_s(self) -> int:
@@ -417,6 +423,9 @@ class ChargeControl(PhaseRecoveryMixin):
             self._recovery_attempted = False
             self._downshift_attempted = False
             self._guard_mismatches = 0
+            reset = getattr(self.coordinator, "reset_fix_failures", None)
+            if reset is not None:
+                reset()
         # Plugging in starts a new session and the wallbox sets its own charge
         # current for it (its hardware minimum). Our cached "last written"
         # setpoint is therefore stale: without this, a target that happens to be

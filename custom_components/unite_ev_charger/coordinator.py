@@ -47,6 +47,7 @@ from .eventlog import EventLog
 from .rest_client import (
     UnitePhpRestClient,
     UniteRestError,
+    async_read_config_fields,
     async_restore_three_phase,
     async_set_lockable_cable,
 )
@@ -80,6 +81,13 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         # Lockable-cable installation setting (web UI). None = unknown
         # (no web UI login, or the firmware lacks the setting).
         self.lockable_cable: bool | None = None
+        # Repair-issue counters (support UX, no control behaviour).
+        self._failed_polls: int = 0
+        self._session_fix_failures: int = 0
+        # JSON config field inventory (setup, best effort). None = unknown,
+        # keep try-JSON-then-webconfig; a set lacking a key skips the doomed
+        # JSON attempt and goes straight to webconfig.
+        self.json_config_fields: set[str] | None = None
         self.last_auto_phase_restore: datetime | None = None
         # monotonic deadline until which a web-UI reboot is considered in
         # progress (set by the restart button); drives the 'restarting' state.
@@ -218,8 +226,10 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                         "Charge control step failed; keeping monitoring alive"
                     )
 
+            self._note_poll_ok()
             return data
         except WebastoModbusError as err:
+            self._note_poll_failed()
             raise UpdateFailed(str(err)) from err
 
     def _maybe_auto_restore_phase(self, data: WallboxData) -> None:
@@ -279,6 +289,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
                 self.entry.data[CONF_HOST],
                 o.get(CONF_REST_USERNAME, DEFAULT_REST_USERNAME),
                 o.get(CONF_REST_PASSWORD, ""),
+                known_fields=self.json_config_fields,
             )
         except UniteRestError as err:
             _LOGGER.warning(
@@ -360,6 +371,75 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             o.get(CONF_REST_PASSWORD, ""),
         )
 
+    async def _raise_repair(
+        self, issue_id: str, translation_key: str, severity: str = "warning"
+    ) -> None:
+        """Show a Repairs issue (best effort; never affects control)."""
+        try:
+            from homeassistant.components import repairs as repairs_mod
+
+            level = getattr(repairs_mod.IssueSeverity, severity.upper(), None)
+            repairs_mod.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"{self.entry.entry_id}_{issue_id}",
+                is_fixable=False,
+                severity=level,
+                translation_key=translation_key,
+            )
+        except Exception as err:  # noqa: BLE001 - support UX only
+            _LOGGER.debug("Could not raise repair issue %s: %s", issue_id, err)
+
+    async def _clear_repair(self, issue_id: str) -> None:
+        try:
+            from homeassistant.components import repairs as repairs_mod
+
+            repairs_mod.async_delete_issue(
+                self.hass, DOMAIN, f"{self.entry.entry_id}_{issue_id}"
+            )
+        except Exception as err:  # noqa: BLE001 - support UX only
+            _LOGGER.debug("Could not clear repair issue %s: %s", issue_id, err)
+
+    def note_fix_escalated(self) -> None:
+        """Count fix escalations this session; repair at two (pattern, not pech)."""
+        self._session_fix_failures += 1
+        if self._session_fix_failures >= 2:
+            self.hass.async_create_task(
+                self._raise_repair("fix_failed", "fix_failed")
+            )
+
+    def reset_fix_failures(self) -> None:
+        if self._session_fix_failures:
+            self.hass.async_create_task(self._clear_repair("fix_failed"))
+        self._session_fix_failures = 0
+
+    def _note_poll_ok(self) -> None:
+        if self._failed_polls:
+            self.hass.async_create_task(self._clear_repair("unreachable"))
+        self._failed_polls = 0
+
+    def _note_poll_failed(self) -> None:
+        self._failed_polls += 1
+        if self._failed_polls == 5:
+            self.hass.async_create_task(
+                self._raise_repair("unreachable", "unreachable", severity="error")
+            )
+
+    async def async_read_config_fields_once(self) -> None:
+        """Inventory the JSON config fields once (best effort, never fails setup)."""
+        o = self.entry.options
+        if not o.get(CONF_REST_ENABLED, DEFAULT_REST_ENABLED):
+            return
+        try:
+            self.json_config_fields = await async_read_config_fields(
+                async_get_clientsession(self.hass),
+                self.entry.data.get(CONF_HOST, ""),
+                o.get(CONF_REST_USERNAME, DEFAULT_REST_USERNAME),
+                o.get(CONF_REST_PASSWORD, ""),
+            )
+        except Exception as err:  # noqa: BLE001 - luxury measurement only
+            _LOGGER.debug("Could not inventory JSON config fields: %s", err)
+
     async def async_refresh_lockable_cable(self) -> None:
         """Read the lockable-cable installation setting (best effort)."""
         client = self._webconfig_client()
@@ -390,6 +470,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
             o.get(CONF_REST_USERNAME, DEFAULT_REST_USERNAME),
             o.get(CONF_REST_PASSWORD, ""),
             enabled,
+            known_fields=self.json_config_fields,
         )
         value: bool | None = None
         php = self._webconfig_client()

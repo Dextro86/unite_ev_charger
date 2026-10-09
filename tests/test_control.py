@@ -23,6 +23,34 @@ def test_is_phase_mismatch():
     assert C.is_phase_mismatch(False, True, 0.0, 0.0, 0.0) is False
 
 
+def test_is_phase_mismatch_down():
+    # 1-phase actively requested but all three drawing -> mismatch
+    assert C.is_phase_mismatch_down(True, True, 15.0, 15.0, 15.0) is True
+    # 1-phase requested and genuinely 1-phase -> no mismatch
+    assert C.is_phase_mismatch_down(True, True, 15.0, 0.0, 0.0) is False
+    # no 1-phase request -> never a mismatch
+    assert C.is_phase_mismatch_down(True, False, 15.0, 15.0, 15.0) is False
+    # not charging -> never a mismatch
+    assert C.is_phase_mismatch_down(False, True, 0.0, 0.0, 0.0) is False
+
+
+def test_mismatch_direction():
+    assert C.mismatch_direction(True, True, False, 15.0, 0.0, 0.0) == "up"
+    assert C.mismatch_direction(True, False, True, 15.0, 15.0, 15.0) == "down"
+    assert C.mismatch_direction(True, True, False, 15.0, 15.0, 15.0) is None
+    assert C.mismatch_direction(True, False, True, 15.0, 0.0, 0.0) is None
+    assert C.mismatch_direction(False, True, False, 15.0, 0.0, 0.0) is None
+
+
+def test_phase_word_mappings():
+    assert C.phase_word_from_raw(0) == "1_phase"
+    assert C.phase_word_from_raw(1) == "3_phases"
+    assert C.phase_word_from_raw(None) is None
+    assert C.phase_word_from_wish("1") == "1_phase"
+    assert C.phase_word_from_wish("3") == "3_phases"
+    assert C.phase_word_from_wish(None) is None
+
+
 def _state(**over):
     base = dict(
         connection_ok=True, restarting=False, faulted=False,

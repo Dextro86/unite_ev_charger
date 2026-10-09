@@ -15,19 +15,34 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import control as ctrl
-from .const import DOMAIN, PHASE_3P
+from .const import DOMAIN, PHASE_1P, PHASE_3P
 from .coordinator import WebastoCoordinator
 from .entity import UniteEntity
 
 
 def _phase_mismatch(coordinator: WebastoCoordinator) -> bool:
-    """Only a real mismatch when 3-phase was actively requested (not the resting
-    405 default), so a 1-phase car never trips it. See control.is_phase_mismatch."""
+    """Only a real mismatch on an explicit phase wish (not the resting 405
+    default): 3-phase wished but 1 drawn (a 1-phase car never trips it), or
+    1-phase wished but 3 drawn (a 1-phase car cannot trip it)."""
     d = coordinator.data
     controller = coordinator.controller
     requested_3p = controller is not None and controller.requested_phase == PHASE_3P
-    return ctrl.is_phase_mismatch(
-        d.charging, requested_3p, d.current_l1_a, d.current_l2_a, d.current_l3_a
+    requested_1p = controller is not None and controller.requested_phase == PHASE_1P
+    return ctrl.mismatch_direction(
+        d.charging, requested_3p, requested_1p,
+        d.current_l1_a, d.current_l2_a, d.current_l3_a,
+    ) is not None
+
+
+def _phase_mismatch_direction(coordinator: WebastoCoordinator) -> str | None:
+    """"up" (stuck on 1), "down" (stuck on 3) or None when converged."""
+    d = coordinator.data
+    controller = coordinator.controller
+    requested_3p = controller is not None and controller.requested_phase == PHASE_3P
+    requested_1p = controller is not None and controller.requested_phase == PHASE_1P
+    return ctrl.mismatch_direction(
+        d.charging, requested_3p, requested_1p,
+        d.current_l1_a, d.current_l2_a, d.current_l3_a,
     )
 
 
@@ -100,6 +115,12 @@ class UniteBinarySensor(UniteEntity, BinarySensorEntity):
         if self.coordinator.data is None:
             return None
         return self.entity_description.value_fn(self.coordinator)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        if self.entity_description.key != "phase_mismatch":
+            return {}
+        return {"direction": _phase_mismatch_direction(self.coordinator)}
 
 
 class UniteConnectionSensor(UniteEntity, BinarySensorEntity):

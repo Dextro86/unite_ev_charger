@@ -24,7 +24,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import control as ctrl
-from .const import CHARGER_STATES, CONF_REST_ENABLED, DEFAULT_REST_ENABLED, DOMAIN, PHASE_3P
+from .const import CHARGER_STATES, CONF_REST_ENABLED, DEFAULT_REST_ENABLED, DOMAIN, PHASE_1P, PHASE_3P
 from .coordinator import WebastoCoordinator
 from .entity import UniteEntity
 from .models import WallboxData
@@ -157,20 +157,23 @@ SENSORS: tuple[UniteSensorDescription, ...] = (
     ),
     # Raw phase capability register 404 (0 = 1-phase, 1 = 3-phase), re-read every
     # cycle. This is also the default register 405 resets to on a disconnection.
+    # Shown as words: a bare 0/1 reads as a count, while here it is a code.
     UniteSensorDescription(
         key="register_404",
         translation_key="register_404",
-        icon="mdi:numeric",
+        device_class=SensorDeviceClass.ENUM,
+        options=["1_phase", "3_phases"],
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: d.phase_capability_raw,
+        value_fn=lambda d: ctrl.phase_word_from_raw(d.phase_capability_raw),
     ),
     # Raw phase register 405 (0 = 1-phase, 1 = 3-phase), for diagnostics.
     UniteSensorDescription(
         key="register_405",
         translation_key="register_405",
-        icon="mdi:numeric",
+        device_class=SensorDeviceClass.ENUM,
+        options=["1_phase", "3_phases"],
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: d.phase_switch_raw,
+        value_fn=lambda d: ctrl.phase_word_from_raw(d.phase_switch_raw),
     ),
     # RFID tag of the running session. Empty on chargers that charge freely, and
     # absent on firmware older than spec v1.9. Useful for per-user billing and
@@ -224,6 +227,7 @@ async def async_setup_entry(
     entities += [
         UniteChargerStateSensor(coordinator),
         UniteRecoveryStatusSensor(coordinator),
+        UniteRequestedPhaseSensor(coordinator),
         UniteRecoveryRemainingSensor(coordinator),
         UniteLastRecoverySensor(coordinator),
     ]
@@ -296,10 +300,11 @@ class UniteChargerStateSensor(UniteEntity, SensorEntity):
             return None
         controller = coord.controller
         requested_3p = controller is not None and controller.requested_phase == PHASE_3P
-        mismatch = ctrl.is_phase_mismatch(
-            data.charging, requested_3p,
+        requested_1p = controller is not None and controller.requested_phase == PHASE_1P
+        mismatch = ctrl.mismatch_direction(
+            data.charging, requested_3p, requested_1p,
             data.current_l1_a, data.current_l2_a, data.current_l3_a,
-        )
+        ) is not None
         return ctrl.derive_charger_state(
             connection_ok=True,
             restarting=False,
@@ -387,9 +392,39 @@ class UniteRecoveryStatusSensor(UniteEntity, SensorEntity):
             return {}
         return {
             "active": controller.recovery_active,
+            "direction": controller.recovery_direction,
             "recovery_enabled": controller.cfg.phase_recovery_enabled,
             "requested_phase": controller.requested_phase,
         }
+
+
+def _requested_phase_state(requested_phase: str | None) -> str | None:
+    """Map a phase wish to the enum state (words come from translations)."""
+    return ctrl.phase_word_from_wish(requested_phase)
+
+
+class UniteRequestedPhaseSensor(UniteEntity, SensorEntity):
+    """Diagnostic: evcc's last phase wish (external control only)."""
+
+    _attr_translation_key = "requested_phase"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["1_phase", "3_phases"]
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: WebastoCoordinator) -> None:
+        super().__init__(coordinator, "requested_phase")
+
+    @property
+    def available(self) -> bool:
+        controller = self.coordinator.controller
+        return bool(controller is not None and controller.is_external)
+
+    @property
+    def native_value(self) -> str | None:
+        controller = self.coordinator.controller
+        if controller is None:
+            return None
+        return _requested_phase_state(controller.requested_phase)
 
 
 class UniteRecoveryRemainingSensor(UniteEntity, SensorEntity):

@@ -98,11 +98,15 @@ class PhaseRecoveryMixin:
     def _start_recovery(self, direction: str = "up") -> None:
         if self.recovery_active:
             return
+        self._recovery_direction = direction
         self._recovery_task = asyncio.create_task(self._recovery_sequence(direction))
         self._record(
             "recovery_attempt",
             f"phase {'downshift' if direction == 'down' else 'recovery'} started",
         )
+        escalated = getattr(self.coordinator, "note_fix_escalated", None)
+        if escalated is not None:
+            escalated()
 
     def _cancel_recovery(self) -> None:
         if self._recovery_task is not None and not self._recovery_task.done():

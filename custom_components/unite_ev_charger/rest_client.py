@@ -149,6 +149,26 @@ class UniteJsonRestClient:
         self._token = None
         await self._login()
 
+    async def get_configuration_fields(self) -> list:
+        """Read the flat configuration field list (read-only inventory)."""
+        if self._token is None:
+            await self._login()
+        try:
+            async with self._session.get(
+                f"{self._base}/configuration-fields/",
+                headers={"Authorization": f"Bearer {self._token}"},
+                ssl=False,
+                timeout=_TIMEOUT,
+            ) as resp:
+                if resp.status in (401, 403):
+                    raise UniteRestAuthError("Invalid web UI username or password")
+                if resp.status != 200:
+                    raise UniteRestError(f"Configuration fields unavailable (HTTP {resp.status})")
+                data = await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            raise UniteRestError(f"Cannot reach the charger web API: {err}") from err
+        return data if isinstance(data, list) else []
+
     async def restart_system(self) -> None:
         await self._post("/custom-actions/restart-system")
 
@@ -384,6 +404,29 @@ async def async_build_rest_client(
     )
 
 
+async def async_read_config_fields(
+    session: aiohttp.ClientSession, host: str, username: str, password: str
+) -> set[str] | None:
+    """Inventory of JSON config fieldKeys, once per setup (best effort).
+
+    Returns the union of fieldKeys across the JSON ports, or None when the
+    list cannot be read anywhere. Never raises: callers treat None as
+    "unknown" and keep the try-JSON-then-webconfig behaviour.
+    """
+    keys: set[str] = set()
+    for port in JSON_API_PORTS:
+        try:
+            client = UniteJsonRestClient(session, host, username, password, port=port)
+            for field in await client.get_configuration_fields():
+                if isinstance(field, dict) and field.get("fieldKey"):
+                    keys.add(str(field["fieldKey"]))
+        except UniteRestError as err:
+            _LOGGER.debug("No configuration-fields on %s:%s (%s)", host, port, err)
+    if keys:
+        _LOGGER.debug("Charger %s JSON config fields: %d known", host, len(keys))
+    return keys or None
+
+
 async def _write_with_server_retry(write, *args) -> None:
     """Run a JSON config write, retrying a server error once.
 
@@ -445,18 +488,27 @@ async def async_restore_three_phase(
     password: str,
     *,
     settle_s: float = 10.0,
+    known_fields: set[str] | None = None,
 ) -> str:
     """Force the installation phase config back to 3-phase.
 
     Toggles ``currentLimiterPhase`` 0 -> (settle) -> 1 so a stuck desync (register
     404 = 0 while the UI still shows 3-phase) is re-synced; writing 1 alone can be
     a no-op when the config layer thinks it is already 3-phase. Uses the JSON
-    config API where present, else the webconfig form. Returns the route used.
-    Auth failures propagate.
+    config API where present, else the webconfig form. When ``known_fields``
+    (setup inventory) lacks the phase key, JSON is skipped outright instead of
+    failing per click. Returns the route used. Auth failures propagate.
     """
     json_endpoint_missing = False
     json_server_error = False
-    for port in JSON_API_PORTS:
+    try_json = known_fields is None or _PHASE_FIELD in known_fields
+    if not try_json:
+        _LOGGER.debug(
+            "Charger %s JSON fields lack %s, going straight to webconfig",
+            host,
+            _PHASE_FIELD,
+        )
+    for port in JSON_API_PORTS if try_json else ():
         if not await _probe_json_api(session, host, port):
             continue
         client = UniteJsonRestClient(session, host, username, password, port=port)
@@ -503,16 +555,27 @@ async def async_set_lockable_cable(
     username: str,
     password: str,
     enabled: bool,
+    *,
+    known_fields: set[str] | None = None,
 ) -> str:
     """Set the lockable-cable installation setting (0/1).
 
-    Prefers the JSON config API where present, else the webconfig form.
-    Returns the route used. Auth failures propagate.
+    Prefers the JSON config API where present, else the webconfig form. When
+    ``known_fields`` (setup inventory) lacks the lockable key, JSON is skipped
+    outright instead of failing per click. Returns the route used. Auth
+    failures propagate.
     """
     value = 1 if enabled else 0
     json_endpoint_missing = False
     json_server_error = False
-    for port in JSON_API_PORTS:
+    try_json = known_fields is None or _LOCKABLE_FIELD in known_fields
+    if not try_json:
+        _LOGGER.debug(
+            "Charger %s JSON fields lack %s, going straight to webconfig",
+            host,
+            _LOCKABLE_FIELD,
+        )
+    for port in JSON_API_PORTS if try_json else ():
         if not await _probe_json_api(session, host, port):
             continue
         client = UniteJsonRestClient(session, host, username, password, port=port)
