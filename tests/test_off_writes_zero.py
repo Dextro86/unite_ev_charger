@@ -5,14 +5,18 @@
   loop confirm it one cycle later.
 * With charging switched ON, a session start does nothing extra.
 * An explicit switch-off always writes 0 A for real, bypassing the
-  "already applied" skip; that skip stays for silent cyclic repetitions.
+  "already applied" skip; silent repetitions skip only with matching readback.
 """
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from uec.controller import ChargeControl
+from uec.modbus import WebastoModbusError
 from uec.models import WallboxData
 
 OPTIONS = {
@@ -104,7 +108,7 @@ def test_explicit_off_forces_real_zero_write() -> None:
 
 
 def test_silent_cycle_still_skips_unchanged_setpoint() -> None:
-    """The 'already applied' skip stays for silent cyclic repetitions."""
+    """Skip silent repetitions only when the hardware confirms the target."""
     ctl, client = _make_control()
     ctl.mode = "manual"
     ctl.manual_current = 10
@@ -112,6 +116,87 @@ def test_silent_cycle_still_skips_unchanged_setpoint() -> None:
     ctl._last_setpoint = 10           # already on the wire
     ctl._was_connected = True
 
-    asyncio.run(ctl.async_apply(_data()))
+    data = _data()
+    data.set_current_a = 10
+    asyncio.run(ctl.async_apply(data))
+
+    assert client.writes == []
+
+
+@pytest.mark.parametrize(
+    "enabled,mode,manual_current,maximum,readback,target",
+    [
+        (False, "manual", 10, 16, 6, 0),
+        (True, "fast", 10, 16, 6, 16),
+        (True, "fast", 10, 12, 6, 12),
+        (True, "manual", 10, 16, 6, 10),
+        (True, "fast", 10, 16, 0, 16),
+        (False, "manual", 10, 16, None, 0),
+    ],
+)
+def test_mid_session_readback_drift_reapplies_current_target(
+    enabled, mode, manual_current, maximum, readback, target,
+) -> None:
+    """A later limit reset must not be hidden by the last-write cache."""
+    ctl, client = _make_control()
+    ctl.cfg = replace(ctl.cfg, max_current=maximum)
+    ctl.mode = mode
+    ctl.manual_current = manual_current
+    ctl.charging_enabled = enabled
+    ctl._last_setpoint = target
+    ctl._was_connected = True  # not a reconnect: exercise cyclic reconciliation
+    data = _data()
+    data.set_current_a = readback
+
+    asyncio.run(ctl.async_apply(data))
+
+    assert client.writes == [("set_current_a", target)]
+    assert ctl.computed_setpoint == target
+
+
+def test_matching_readback_does_not_repeat_reconciliation_write() -> None:
+    ctl, client = _make_control()
+    ctl.mode = "manual"
+    ctl.manual_current = 10
+    ctl._last_setpoint = 10
+    ctl._was_connected = True
+    data = _data()
+    data.set_current_a = 6
+    asyncio.run(ctl.async_apply(data))
+    data.set_current_a = 10
+    asyncio.run(ctl.async_apply(data))
+
+    assert client.writes == [("set_current_a", 10)]
+
+
+def test_failed_reconciliation_write_clears_cache_and_retries() -> None:
+    ctl, client = _make_control()
+    ctl.charging_enabled = False
+    ctl._last_setpoint = 0
+    ctl._was_connected = True
+    data = _data()
+    data.set_current_a = 6
+    write = client.write_register
+
+    async def fail_once(reg, value):
+        raise WebastoModbusError("simulated write failure")
+
+    client.write_register = fail_once
+    asyncio.run(ctl.async_apply(data))
+    assert ctl._last_setpoint is None
+    client.write_register = write
+    asyncio.run(ctl.async_apply(data))
+
+    assert client.writes == [("set_current_a", 0)]
+
+
+def test_external_control_does_not_reconcile_current() -> None:
+    ctl, client = _make_control()
+    ctl.cfg = replace(ctl.cfg, control_mode="external")
+    ctl._last_setpoint = 0
+    ctl._was_connected = True
+    data = _data()
+    data.set_current_a = 6
+    asyncio.run(ctl.async_apply(data))
 
     assert client.writes == []

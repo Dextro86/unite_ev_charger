@@ -197,10 +197,10 @@ def test_setpoint_held_during_quiet_then_resumes():
 
     async def run():
         ctl._last_switch = monotonic()      # a switch just happened
-        await ctl._write_setpoint(10)
+        await ctl._write_setpoint(10, observed_current_a=0)
         held = list(client.writes)
         ctl._last_switch = monotonic() - 25  # quiet period (20 s) elapsed
-        await ctl._write_setpoint(10)
+        await ctl._write_setpoint(10, observed_current_a=0)
         return held, client.writes
 
     held, after = asyncio.run(run())

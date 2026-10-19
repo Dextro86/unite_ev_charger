@@ -494,7 +494,7 @@ class ChargeControl(PhaseRecoveryMixin):
             setpoint = self._anti_short_cycle(setpoint, limits)
 
         self.computed_setpoint = setpoint
-        await self._write_setpoint(setpoint)
+        await self._write_setpoint(setpoint, observed_current_a=data.set_current_a)
 
     # -- internals -----------------------------------------------------------
     def _active_phases(self, data: WallboxData) -> int:
@@ -738,15 +738,25 @@ class ChargeControl(PhaseRecoveryMixin):
         if not enabled:
             self.invalidate_setpoint_cache()
 
-    async def _write_setpoint(self, setpoint: int) -> None:
+    async def _write_setpoint(self, setpoint: int, *, observed_current_a: int | None) -> None:
         # Quiet period right after a phase switch: leave the current setpoint
         # alone so the wallbox can finish its internal CP interruption. The
         # heartbeat (written by the coordinator) keeps going regardless.
         if self._last_switch is not None and monotonic() - self._last_switch < PHASE_SWITCH_QUIET_S:
             _LOGGER.debug("Holding charge-current write during post-phase-switch quiet period")
             return
-        if setpoint == self._last_setpoint:
+        # A successful previous write is not proof that it is still applied:
+        # the charger, its failsafe or another controller can overwrite 5004.
+        # Only skip when this cycle's hardware readback confirms our intent.
+        if setpoint == self._last_setpoint and observed_current_a == setpoint:
             return
+        if setpoint == self._last_setpoint and observed_current_a is not None:
+            _LOGGER.warning(
+                "Charge-current limit drift: hardware=%s A, target=%s A; reapplying target",
+                observed_current_a,
+                setpoint,
+            )
+        self._last_setpoint = None
         try:
             await self.coordinator.client.write_register(R.SET_CURRENT_A, setpoint)
             self._last_setpoint = setpoint
