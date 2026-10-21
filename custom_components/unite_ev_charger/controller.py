@@ -494,6 +494,20 @@ class ChargeControl(PhaseRecoveryMixin):
             setpoint = self._anti_short_cycle(setpoint, limits)
 
         self.computed_setpoint = setpoint
+        # The wallbox can also change 5004 on its own: it applies its hardware
+        # minimum at the start of a session, and that can land a poll after the
+        # session-start write above. Trust the read-back, not only the cache.
+        if (
+            data.set_current_a is not None
+            and self._last_setpoint is not None
+            and data.set_current_a != self._last_setpoint
+        ):
+            _LOGGER.info(
+                "Charger reports %s A, last written %s A; rewriting",
+                data.set_current_a,
+                self._last_setpoint,
+            )
+            self._last_setpoint = None
         await self._write_setpoint(setpoint)
 
     # -- internals -----------------------------------------------------------
