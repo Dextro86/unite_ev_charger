@@ -497,8 +497,11 @@ class ChargeControl(PhaseRecoveryMixin):
         # The wallbox can also change 5004 on its own: it applies its hardware
         # minimum at the start of a session, and that can land a poll after the
         # session-start write above. Trust the read-back, not only the cache.
+        # Only with a vehicle attached: an idle Unite keeps reporting its own
+        # minimum whatever is written, which would rewrite on every poll.
         if (
-            data.set_current_a is not None
+            connected
+            and data.set_current_a is not None
             and self._last_setpoint is not None
             and data.set_current_a != self._last_setpoint
         ):

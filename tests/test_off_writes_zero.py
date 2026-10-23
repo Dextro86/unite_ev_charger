@@ -153,3 +153,21 @@ def test_matching_read_back_still_skips() -> None:
     asyncio.run(ctl.async_apply(d))
 
     assert client.writes == []
+
+
+def test_idle_charger_read_back_is_ignored() -> None:
+    """Without a vehicle the Unite keeps reporting its own minimum whatever is
+    written, so a mismatch there must not cause a rewrite on every poll."""
+    ctl, client = _make_control()
+    ctl.mode = "manual"
+    ctl.charging_enabled = False
+    ctl._last_setpoint = 0
+    ctl._was_connected = False
+
+    d = _data()
+    d.cable_state_raw = 0                 # no vehicle
+    d.set_current_a = 6
+    asyncio.run(ctl.async_apply(d))
+
+    assert client.writes == []
+
