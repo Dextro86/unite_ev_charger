@@ -115,3 +115,58 @@ def test_silent_cycle_still_skips_unchanged_setpoint() -> None:
     asyncio.run(ctl.async_apply(_data()))
 
     assert client.writes == []
+
+
+def test_charger_override_after_session_start_is_rewritten() -> None:
+    """The wallbox sets its own minimum for a new session, and that can land a
+    poll AFTER the session-start 0 A write. Seen live: 0 A written at plug-in,
+    the charger reported 6 A ten seconds later and the car charged with the
+    switch off. The read-back must win over the "already applied" cache."""
+    ctl, client = _make_control()
+    ctl.mode = "manual"
+    ctl.charging_enabled = False
+    ctl._was_connected = False
+
+    first = _data()
+    first.set_current_a = 0
+    asyncio.run(ctl.async_apply(first))   # plug-in: 0 A goes out
+    client.writes.clear()
+
+    later = _data()
+    later.set_current_a = 6               # the charger's own session minimum
+    asyncio.run(ctl.async_apply(later))
+
+    assert client.writes == [("set_current_a", 0)]
+
+
+def test_matching_read_back_still_skips() -> None:
+    """When the charger reports what we last wrote, nothing is rewritten."""
+    ctl, client = _make_control()
+    ctl.mode = "manual"
+    ctl.manual_current = 10
+    ctl.charging_enabled = True
+    ctl._last_setpoint = 10
+    ctl._was_connected = True
+
+    d = _data()
+    d.set_current_a = 10
+    asyncio.run(ctl.async_apply(d))
+
+    assert client.writes == []
+
+
+def test_idle_charger_read_back_is_ignored() -> None:
+    """Without a vehicle the Unite keeps reporting its own minimum whatever is
+    written, so a mismatch there must not cause a rewrite on every poll."""
+    ctl, client = _make_control()
+    ctl.mode = "manual"
+    ctl.charging_enabled = False
+    ctl._last_setpoint = 0
+    ctl._was_connected = False
+
+    d = _data()
+    d.cable_state_raw = 0                 # no vehicle
+    d.set_current_a = 6
+    asyncio.run(ctl.async_apply(d))
+
+    assert client.writes == []
