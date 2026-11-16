@@ -29,6 +29,10 @@ from .const import (
     CHARGE_MODES,
     CONF_CONTROL_MODE,
     CONF_DEFAULT_MODE,
+    CONF_EVCC_API_URL,
+    CONF_EVCC_MQTT_TOPIC,
+    CONF_EVCC_WATCHDOG_MODE,
+    CONF_EVCC_WATCHDOG_TIMEOUT,
     CONF_GRID_PHASES,
     CONF_DLB_CURRENT_L1,
     CONF_DLB_CURRENT_L2,
@@ -65,6 +69,10 @@ from .const import (
     CONTROL_MODES,
     DEFAULT_CONTROL_MODE,
     DEFAULT_DLB_MARGIN_A,
+    DEFAULT_EVCC_API_URL,
+    DEFAULT_EVCC_MQTT_TOPIC,
+    DEFAULT_EVCC_WATCHDOG_MODE,
+    DEFAULT_EVCC_WATCHDOG_TIMEOUT_S,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
     DEFAULT_MAIN_FUSE_A,
@@ -87,15 +95,24 @@ from .const import (
     GRID_PHASES,
     GRID_PHASES_1,
     GRID_PHASES_3,
+    MAX_EVCC_WATCHDOG_TIMEOUT_S,
     MAX_PHASE_RESTORE_DELAY_S,
     MAX_POLL_INTERVAL,
     METER_DSMR,
     METER_MODELS,
     METER_SIGNED_GRID,
     METER_SURPLUS,
+    MIN_EVCC_WATCHDOG_TIMEOUT_S,
     MIN_PHASE_RESTORE_DELAY_S,
     MIN_POLL_INTERVAL,
     NOMINAL_VOLTAGE,
+)
+from .evcc_watchdog import (
+    WATCHDOG_API,
+    WATCHDOG_MQTT,
+    EvccApiError,
+    EvccWatchdog,
+    async_probe_evcc_api,
 )
 from .modbus import WebastoModbus, WebastoModbusError
 from .rest_client import UniteRestAuthError, UniteRestError, async_build_rest_client
@@ -134,6 +151,16 @@ def _control_mode_selector() -> selector.SelectSelector:
         selector.SelectSelectorConfig(
             options=list(CONTROL_MODES),
             translation_key="control_mode",
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _evcc_watchdog_mode_selector() -> selector.SelectSelector:
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=["off", "api", "mqtt"],
+            translation_key="evcc_watchdog_mode",
             mode=selector.SelectSelectorMode.DROPDOWN,
         )
     )
@@ -313,7 +340,63 @@ class UniteOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         return self.async_show_menu(
             step_id="init",
-            menu_options=["connection", "charge", "meter", "dlb", "solar", "advanced", "reboot", "save"],
+            menu_options=["connection", "charge", "meter", "dlb", "solar", "advanced", "watchdog", "reboot", "save"],
+        )
+
+    def _watchdog_status(self) -> str:
+        """Live status line for the top of the watchdog screen."""
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id)
+        watchdog: EvccWatchdog | None = getattr(coordinator, "evcc_watchdog", None)
+        if watchdog is None:
+            return "Currently off."
+        return watchdog.status_line()
+
+    async def async_step_watchdog(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        status = self._watchdog_status()
+        if user_input is not None:
+            mode = user_input.get(CONF_EVCC_WATCHDOG_MODE, DEFAULT_EVCC_WATCHDOG_MODE)
+            if mode == WATCHDOG_API:
+                try:
+                    await async_probe_evcc_api(
+                        async_get_clientsession(self.hass),
+                        user_input.get(CONF_EVCC_API_URL, ""),
+                    )
+                except EvccApiError as err:
+                    errors["base"] = "evcc_unreachable"
+                    status = f"Last check failed: {err}."
+                except Exception:  # noqa: BLE001
+                    errors["base"] = "unknown"
+            elif mode == WATCHDOG_MQTT and not (user_input.get(CONF_EVCC_MQTT_TOPIC) or "").strip():
+                errors["base"] = "mqtt_no_topic"
+            if not errors:
+                self.options.update(user_input)
+                return await self.async_step_init()
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_EVCC_WATCHDOG_MODE, default=DEFAULT_EVCC_WATCHDOG_MODE): (
+                    _evcc_watchdog_mode_selector()
+                ),
+                vol.Required(CONF_EVCC_API_URL, default=DEFAULT_EVCC_API_URL): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+                ),
+                vol.Required(CONF_EVCC_MQTT_TOPIC, default=DEFAULT_EVCC_MQTT_TOPIC): (
+                    selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+                    )
+                ),
+                vol.Required(
+                    CONF_EVCC_WATCHDOG_TIMEOUT, default=DEFAULT_EVCC_WATCHDOG_TIMEOUT_S
+                ): _num(
+                    MIN_EVCC_WATCHDOG_TIMEOUT_S, MAX_EVCC_WATCHDOG_TIMEOUT_S, 1, "s"
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="watchdog",
+            data_schema=self.add_suggested_values_to_schema(schema, self.options),
+            errors=errors,
+            description_placeholders={"status": status},
         )
 
     async def async_step_reboot(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

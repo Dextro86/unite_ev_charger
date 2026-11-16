@@ -53,6 +53,9 @@ Available in **English and Dutch** — Home Assistant picks the user's language.
   entities evcc's Home Assistant charger expects, or a full custom charger
   definition with RFID identification and phase switching. See
   [Use in evcc](#use-in-evcc).
+- **evcc watchdog** *(opt-in, off by default, external mode only)* — caps
+  charging at the backup current while evcc itself shows no sign of life; see
+  evcc watchdog below.
 - **Restart button (web UI)** *(opt-in)* — reboot the wallbox from HA over its
   local web UI, since Modbus has no reboot register. See
   [Web UI details](#web-ui-details).
@@ -152,6 +155,26 @@ Only change these if you know why. Wrong values can stall charging.
   1-phase help** (normally 121 s) and **waiting time after unplugging**
   (normally 5 s) — these only apply when their switch on the Charging screen
   is on.
+
+### evcc watchdog
+
+*Optional, off by default, and only for control mode External.* In internal
+modes Home Assistant itself decides, so a silent evcc means nothing there. The
+charger's own backup only kicks in when Home Assistant stops talking to it. If
+evcc itself stops — crash, container down, network — Home Assistant keeps the
+charger alive at evcc's last setting. The watchdog closes that gap: no sign of
+life for the configured silence time and charging is capped at the backup
+current (Advanced screen, normally 6 A).
+
+Two sources, pick whichever fits your setup: **evcc web API** (one address,
+checked when you save, no login needed) or **MQTT** (needs `mqtt:` in evcc and
+Home Assistant's MQTT integration on the same broker; any live message on the
+topic counts, retained replays don't). A command from evcc also counts as a
+sign of life. evcc's requested current is kept and restored when it's back
+(evcc does not re-send an unchanged value by itself). A Repairs notice and
+the diagnostic **evcc connection** sensor show the state; the watchdog screen
+shows the live status at the top. Keep the silence time well above evcc's
+`interval` (minimum 60 s).
 
 ### Web UI
 

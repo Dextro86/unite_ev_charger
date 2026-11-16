@@ -98,6 +98,7 @@ async def async_setup_entry(
         UniteBinarySensor(coordinator, desc) for desc in BINARY_SENSORS
     ]
     entities.append(UniteConnectionSensor(coordinator))
+    entities.append(UniteEvccWatchdogSensor(coordinator))
     async_add_entities(entities)
 
 
@@ -153,4 +154,40 @@ class UniteConnectionSensor(UniteEntity, BinarySensorEntity):
             "last_response_ms": stats.last_response_ms,
             "avg_response_ms": round(stats.avg_response_ms) if stats.avg_response_ms is not None else None,
             "last_error": stats.last_error,
+        }
+
+
+class UniteEvccWatchdogSensor(UniteEntity, BinarySensorEntity):
+    """evcc liveness. On while evcc shows no sign of life (charging is capped).
+
+    Only in external control mode, and only available when the watchdog is
+    enabled.
+    """
+
+    _attr_translation_key = "evcc_connection"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: WebastoCoordinator) -> None:
+        super().__init__(coordinator, "evcc_connection")
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.evcc_watchdog is not None
+
+    @property
+    def is_on(self) -> bool:
+        watchdog = self.coordinator.evcc_watchdog
+        return bool(watchdog is not None and watchdog.is_stale())
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        watchdog = self.coordinator.evcc_watchdog
+        if watchdog is None:
+            return {}
+        return {
+            "mode": watchdog.mode,
+            "source": watchdog.source,
+            "seconds_since_seen": round(watchdog.seconds_since_seen(), 1),
+            "last_error": watchdog.last_error,
         }

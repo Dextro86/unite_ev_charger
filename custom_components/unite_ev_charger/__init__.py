@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
 from .const import (
@@ -45,6 +46,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(f"Could not reach the charger: {err}") from err
 
     coordinator.controller = ChargeControl(hass, entry, coordinator)
+    # Opt-in evcc watchdog (external mode only, off by default): never fails setup.
+    try:
+        await coordinator.async_start_evcc_watchdog(async_get_clientsession(hass))
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("Could not start the evcc watchdog", exc_info=True)
     await coordinator.async_config_entry_first_refresh()
 
     await _async_maybe_repair_unique_id(hass, entry, coordinator)
@@ -118,6 +124,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         coordinator: WebastoCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        try:
+            await coordinator.async_stop_evcc_watchdog()
+        except Exception:  # noqa: BLE001 - unload must still close the client
+            _LOGGER.debug("Could not stop the evcc watchdog", exc_info=True)
         if coordinator.controller is not None:
             await coordinator.controller.async_shutdown()
         try:

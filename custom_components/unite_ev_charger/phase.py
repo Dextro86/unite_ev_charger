@@ -55,6 +55,9 @@ class PhaseRecoveryMixin:
     _ext_resume_current: int
     _last_setpoint: int | None
 
+    # Provided by the controller; declared so checkers see the mixin's host.
+    def _cap_external_current(self, value: int) -> int: ...
+
     # -- gates ---------------------------------------------------------------
     @staticmethod
     def _measured_single_phase(data: WallboxData) -> bool:
@@ -226,7 +229,11 @@ class PhaseRecoveryMixin:
             value = max(0, min(ABS_MAX_CURRENT_A, int(value)))
             if value > 0:
                 self._ext_resume_current = value
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, value)
+            # While evcc is lost the resume respects the cap, like every
+            # other external current write.
+            await self.coordinator.client.write_register(
+                R.SET_CURRENT_A, self._cap_external_current(value)
+            )
         else:
             # Internal: let the control loop write the freshly computed setpoint
             # for the new phase config on the next cycle.

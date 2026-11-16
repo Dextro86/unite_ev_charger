@@ -209,6 +209,23 @@ CONF_DLB_CURRENT_L3: Final = "dlb_current_l3"
 CONF_FAILSAFE_CURRENT: Final = "failsafe_current"
 CONF_FAILSAFE_TIMEOUT: Final = "failsafe_timeout"
 
+# evcc watchdog (external control mode only): cap the charge current at the
+# failsafe current while evcc itself goes silent. The charger's own failsafe
+# cannot see this, because Home Assistant keeps writing the alive heartbeat as
+# long as HA <-> charger works. Sign of life: evcc's HTTP API or an MQTT topic
+# (see evcc_watchdog.py). Opt-in, off by default. Minimum 60 s: evcc's own
+# default interval is 30 s, so anything shorter would fire on a single slow poll.
+CONF_EVCC_WATCHDOG_MODE: Final = "evcc_watchdog_mode"
+CONF_EVCC_API_URL: Final = "evcc_api_url"
+CONF_EVCC_MQTT_TOPIC: Final = "evcc_mqtt_topic"
+CONF_EVCC_WATCHDOG_TIMEOUT: Final = "evcc_watchdog_timeout"
+DEFAULT_EVCC_WATCHDOG_MODE: Final = "off"
+DEFAULT_EVCC_API_URL: Final = "http://evcc:7070"
+DEFAULT_EVCC_MQTT_TOPIC: Final = "evcc/updated"
+DEFAULT_EVCC_WATCHDOG_TIMEOUT_S: Final = 120
+MIN_EVCC_WATCHDOG_TIMEOUT_S: Final = 60
+MAX_EVCC_WATCHDOG_TIMEOUT_S: Final = 900
+
 # --- REST web API (opt-in; only used for the restart button) ----------------
 # The wallbox can be rebooted via its web UI. Modbus has no reboot register, so
 # this is the one thing we do over HTTPS. Fully isolated from the Modbus control

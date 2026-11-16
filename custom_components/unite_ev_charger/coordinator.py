@@ -16,8 +16,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from typing import Any
+
 from . import registers as R
 from .const import (
+    CONF_CONTROL_MODE,
     CONF_FAILSAFE_CURRENT,
     CONF_FAILSAFE_TIMEOUT,
     CONF_GRID_PHASES,
@@ -29,6 +32,16 @@ from .const import (
     CONF_REST_ENABLED,
     CONF_REST_PASSWORD,
     CONF_REST_USERNAME,
+    CONF_EVCC_API_URL,
+    CONF_EVCC_MQTT_TOPIC,
+    CONF_EVCC_WATCHDOG_MODE,
+    CONF_EVCC_WATCHDOG_TIMEOUT,
+    CONTROL_EXTERNAL,
+    DEFAULT_CONTROL_MODE,
+    DEFAULT_EVCC_API_URL,
+    DEFAULT_EVCC_MQTT_TOPIC,
+    DEFAULT_EVCC_WATCHDOG_MODE,
+    DEFAULT_EVCC_WATCHDOG_TIMEOUT_S,
     DEFAULT_FAILSAFE_CURRENT_A,
     DEFAULT_FAILSAFE_TIMEOUT_S,
     DEFAULT_PHASE_RESTORE_DELAY_S,
@@ -44,6 +57,7 @@ from .const import (
 from . import control as ctrl
 from .control import effective_poll_interval
 from .eventlog import EventLog
+from .evcc_watchdog import TRANSITION_LOST, TRANSITION_RECOVERED, EvccWatchdog, WATCHDOG_OFF
 from .rest_client import (
     UnitePhpRestClient,
     UniteRestError,
@@ -71,7 +85,7 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         self.client = client
         self.device = DeviceInfo()
         self.event_log = EventLog()
-        self.controller = None  # wired in once control is built
+        self.controller: Any = None  # wired in once control is built
         self._vehicle_was_connected = False
         self._auto_restore_task: asyncio.Task | None = None
         self._rfid_probe = ctrl.RfidProbe()
@@ -95,6 +109,11 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         # Last restart attempt (recorded by the button, no polling).
         self.rest_last_restart_at: datetime | None = None
         self.rest_last_restart_result: str | None = None  # success/auth_failed/unreachable
+        # evcc watchdog (external control mode only): while evcc shows no sign
+        # of life, evcc current writes are capped at the failsafe current.
+        # evcc's intent is kept untouched, so it can be put back on recovery.
+        self.evcc_watchdog: EvccWatchdog | None = None
+        self._evcc_throttled = False
 
         poll = int(entry.options.get(
             CONF_POLL_INTERVAL,
@@ -202,11 +221,22 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
 
             self._maybe_auto_restore_phase(data)
 
+            # Evaluated before the ownership handshake, so a reconnect in this
+            # same poll already programs the capped current instead of evcc's
+            # last (possibly full) setpoint.
+            evcc_transition = self._evaluate_evcc_watchdog()
+
             # First connect or a reconnect after the wallbox dropped us: the
             # Unite resets its failsafe + charging-current registers on every new
             # Modbus connection, so re-assert ownership before the heartbeat.
             if self.client.take_new_connection():
                 await self._on_new_connection(data)
+
+            if evcc_transition is not None:
+                try:
+                    await self._async_apply_evcc_transition(evcc_transition)
+                except Exception as err:  # noqa: BLE001 - heartbeat must still go out
+                    _LOGGER.warning("Could not apply evcc watchdog change: %s", err)
 
             # Keep the failsafe watchdog happy.
             await write_heartbeat(self.client)
@@ -522,3 +552,94 @@ class WebastoCoordinator(DataUpdateCoordinator[WallboxData]):
         # restart whenever that read transiently returned nothing (charger still
         # booting / Modbus busy) and it fell back to entry_id.
         return self.entry.unique_id or self.entry.entry_id
+
+    # --- evcc watchdog (external control mode only) --------------------------
+
+    @property
+    def failsafe_current_a(self) -> int:
+        return int(self.entry.options.get(CONF_FAILSAFE_CURRENT, DEFAULT_FAILSAFE_CURRENT_A))
+
+    @property
+    def evcc_throttled(self) -> bool:
+        """True while evcc is silent and external current writes are capped."""
+        return self._evcc_throttled
+
+    def cap_external_current(self, value: int) -> int:
+        """Limit an evcc current write to the failsafe current while evcc is lost."""
+        if self._evcc_throttled:
+            return min(int(value), int(self.failsafe_current_a))
+        return int(value)
+
+    def note_evcc_command(self) -> None:
+        """A command from evcc proves it is alive and can reach Home Assistant."""
+        if self.evcc_watchdog is not None:
+            self.evcc_watchdog.mark_alive()
+
+    async def async_start_evcc_watchdog(self, session) -> None:
+        """Build and start the watchdog from the entry options (if enabled).
+
+        External control mode only: in internal modes Home Assistant itself is
+        the controller, so a silent evcc is meaningless and nothing is capped.
+        """
+        o = self.entry.options
+        if o.get(CONF_CONTROL_MODE, DEFAULT_CONTROL_MODE) != CONTROL_EXTERNAL:
+            return
+        if o.get(CONF_EVCC_WATCHDOG_MODE, DEFAULT_EVCC_WATCHDOG_MODE) == WATCHDOG_OFF:
+            return
+        self.evcc_watchdog = EvccWatchdog(
+            self.hass,
+            mode=o.get(CONF_EVCC_WATCHDOG_MODE, DEFAULT_EVCC_WATCHDOG_MODE),
+            timeout_s=int(o.get(CONF_EVCC_WATCHDOG_TIMEOUT, DEFAULT_EVCC_WATCHDOG_TIMEOUT_S)),
+            api_url=o.get(CONF_EVCC_API_URL, DEFAULT_EVCC_API_URL),
+            mqtt_topic=o.get(CONF_EVCC_MQTT_TOPIC, DEFAULT_EVCC_MQTT_TOPIC),
+            session=session,
+        )
+        await self.evcc_watchdog.async_start()
+        self.async_update_listeners()
+
+    async def async_stop_evcc_watchdog(self) -> None:
+        if self.evcc_watchdog is not None:
+            try:
+                await self.evcc_watchdog.async_stop()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Could not stop the evcc watchdog", exc_info=True)
+            self.evcc_watchdog = None
+
+    def _evaluate_evcc_watchdog(self) -> str | None:
+        watchdog = self.evcc_watchdog
+        if watchdog is None:
+            return None
+        transition = watchdog.evaluate()
+        if transition == TRANSITION_LOST:
+            self._evcc_throttled = True
+        elif transition == TRANSITION_RECOVERED:
+            self._evcc_throttled = False
+        return transition
+
+    async def _async_apply_evcc_transition(self, transition: str) -> None:
+        controller = self.controller
+        if transition == TRANSITION_LOST:
+            _LOGGER.warning(
+                "No sign of life from evcc (%s) for %ss; capping charge current at %sA "
+                "until it is back (last error: %s)",
+                self.evcc_watchdog.source if self.evcc_watchdog else "?",
+                self.evcc_watchdog.timeout_s if self.evcc_watchdog else "?",
+                self.failsafe_current_a,
+                self.evcc_watchdog.last_error if self.evcc_watchdog else None,
+            )
+            self.record_event("evcc_lost", f"capped at {self.failsafe_current_a}A")
+            await self._raise_repair("evcc_lost", "evcc_lost")
+            # Re-asserting re-uses the controller's own write path, so a
+            # recovery pause (which owns 0 A) is never broken and every
+            # branch is capped in one place. Without a controller yet there
+            # is nothing to write.
+            if controller is not None:
+                await controller._reassert_current_on_reconnect()
+        elif transition == TRANSITION_RECOVERED:
+            # evcc does not re-send an unchanged setpoint, so put its last
+            # intent back ourselves instead of waiting for it.
+            _LOGGER.info("evcc is back; restoring its requested charge current")
+            self.record_event("evcc_back", "restoring evcc intent")
+            await self._clear_repair("evcc_lost")
+            if controller is not None:
+                await controller._reassert_current_on_reconnect()

@@ -53,6 +53,18 @@ async def async_get_config_entry_diagnostics(
             "last_restart_at": _iso(coordinator.rest_last_restart_at),
             "last_restart_result": coordinator.rest_last_restart_result,
         },
+        "evcc_watchdog": (
+            None
+            if coordinator.evcc_watchdog is None
+            else {
+                "mode": coordinator.evcc_watchdog.mode,
+                "source": coordinator.evcc_watchdog.source,
+                "timeout_s": coordinator.evcc_watchdog.timeout_s,
+                "throttled": coordinator.evcc_throttled,
+                "seconds_since_seen": round(coordinator.evcc_watchdog.seconds_since_seen(), 1),
+                "last_error": coordinator.evcc_watchdog.last_error,
+            }
+        ),
     }
 
     if controller is not None:

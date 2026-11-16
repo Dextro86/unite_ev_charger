@@ -270,10 +270,31 @@ class ChargeControl(PhaseRecoveryMixin):
     # opt-in 1->3 recovery: while its forced pause runs, evcc's current/enable
     # commands are buffered (a 0 A / stop still passes straight through) and the
     # entities report evcc's intent so evcc stays in sync.
+
+    def _cap_external_current(self, value: int) -> int:
+        """Cap an evcc current write at the failsafe current while evcc is lost.
+
+        The coordinator owns the watchdog state; without one (internal modes,
+        older tests) the value passes through untouched.
+        """
+        cap = getattr(self.coordinator, "cap_external_current", None)
+        if callable(cap):
+            result = cap(value)
+            if isinstance(result, int):
+                return result
+        return int(value)
+
+    def _note_evcc_command(self) -> None:
+        """A command from evcc proves it is alive and can reach Home Assistant."""
+        note = getattr(self.coordinator, "note_evcc_command", None)
+        if callable(note):
+            note()
+
     async def async_external_set_current(self, amps: float) -> None:
         value = max(0, min(ABS_MAX_CURRENT_A, int(round(amps))))  # physical clamp only
         self._current_intent = value
         self._enabled_intent = value > 0
+        self._note_evcc_command()
         if value > 0:
             self._ext_resume_current = value
         self.coordinator.async_update_listeners()
@@ -283,13 +304,16 @@ class ChargeControl(PhaseRecoveryMixin):
             if value == 0:
                 await self.coordinator.client.write_register(R.SET_CURRENT_A, 0)
             return
-        await self.coordinator.client.write_register(R.SET_CURRENT_A, value)
+        await self.coordinator.client.write_register(
+            R.SET_CURRENT_A, self._cap_external_current(value)
+        )
         await self.coordinator.async_request_refresh()
 
     async def async_external_set_enabled(self, enabled: bool) -> None:
         await self.async_external_set_current(self._ext_resume_current if enabled else 0)
 
     async def async_external_set_phase(self, phases: int) -> None:
+        self._note_evcc_command()
         if phases != 3:
             self._requested_phase = "1"
             self._recovery_attempted = False   # a 1P request re-arms recovery
@@ -333,7 +357,9 @@ class ChargeControl(PhaseRecoveryMixin):
             else:
                 value = self._current_intent
             value = max(0, min(ABS_MAX_CURRENT_A, int(value)))
-            await self.coordinator.client.write_register(R.SET_CURRENT_A, value)
+            await self.coordinator.client.write_register(
+                R.SET_CURRENT_A, self._cap_external_current(value)
+            )
         else:
             # Internal: the cached last-setpoint is now stale; force the control
             # loop to re-write the freshly computed setpoint this cycle.
